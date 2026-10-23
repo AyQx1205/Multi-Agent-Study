@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 MIN_EF = 1.3
-MAX_EF = 2.5
+MAX_EF = 3.0
 
 class ReviewItem(BaseModel):
     knowledge_id: str = Field(description="复习知识点id")
@@ -19,12 +19,11 @@ class ReviewItem(BaseModel):
     last_review: datetime | None = Field(default=None, description="上次复习时间")
     total_reviews: int = Field(default=0, description="总复习次数")
 
-    @property
-    def is_due(self) -> bool:
-        return datetime.now() >= self.next_review
+    def is_due(self, now: datetime | None = None) -> bool:
+        return (now or datetime.now()) >= self.next_review
 
-    def overdue_days(self) -> float:
-        return (datetime.now() - self.next_review).total_seconds() / 86400
+    def overdue_days(self, now: datetime | None = None) -> float:
+        return max(0.0, ((now or datetime.now()) - self.next_review).total_seconds() / 86400)
 
 class SpacedRepetition:
     def review(self,item: ReviewItem,quality: int,now:datetime | None = None) -> ReviewItem:
@@ -62,9 +61,10 @@ class SpacedRepetition:
         schedule:dict[str,list[str]] = {}
         for offset in range(days_ahead):
             day = (now + timedelta(days=offset)).date()
-            bucket = [item.knowledge_id for item in items if item.next_review.date() == day]
+            if offset == 0:
+                bucket = [item.knowledge_id for item in items if item.next_review.date() <= day]
+            else:
+                bucket = [item.knowledge_id for item in items if item.next_review.date() == day]
             if bucket:
                 schedule[day.isoformat()] = sorted(set(bucket))        
-        return schedule
-    
-    
+        return schedule    
