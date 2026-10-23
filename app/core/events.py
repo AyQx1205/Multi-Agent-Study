@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 MAX_DEPTH = 20
 HISTORY_LIMIT = 1000
 
-class EventType(Enum):
+class EventType(str, Enum):
     # 学生输入
     STUDENT_SUBMISSION = "student.submission"
     STUDENT_QUESTION = "student.question"
