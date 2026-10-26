@@ -1,5 +1,3 @@
-"""公共 fixture：每个测试一套干净对象。"""
-
 from __future__ import annotations
 
 from datetime import datetime

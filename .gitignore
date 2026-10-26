@@ -1,9 +1,12 @@
 .venv/
+vendor/
 __pycache__/
 *.pyc
 .pytest_cache/
 .env
 *.db
-knowledge.db
+*.db-wal
+*.db-shm
+.tmp/
 .coverage
 htmlcov/
