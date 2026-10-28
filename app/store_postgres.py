@@ -16,8 +16,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.content import Attempt, Question, QuestionType
 from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
+from app.core.spaced_repetition import ReviewItem
 
 try:
     import asyncpg
@@ -71,6 +73,35 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_learner ON events(learner_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_events_corr ON events(correlation_id);
+
+CREATE TABLE IF NOT EXISTS questions (
+    id           TEXT PRIMARY KEY,
+    knowledge_id TEXT NOT NULL,
+    grade        INTEGER NOT NULL,
+    type         TEXT NOT NULL,
+    stem         TEXT NOT NULL,
+    options      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    answer       TEXT NOT NULL,
+    accepted     JSONB NOT NULL DEFAULT '[]'::jsonb,
+    explanation  TEXT NOT NULL DEFAULT '',
+    difficulty   INTEGER NOT NULL DEFAULT 2,
+    source       TEXT NOT NULL DEFAULT 'seed',
+    version      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_questions_knowledge ON questions(knowledge_id, grade);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    id                 TEXT PRIMARY KEY,
+    learner_id         TEXT NOT NULL,
+    question_id        TEXT NOT NULL,
+    knowledge_id       TEXT NOT NULL,
+    answer             TEXT NOT NULL,
+    is_correct         BOOLEAN NOT NULL,
+    time_spent_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_learner ON attempts(learner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attempts_question ON attempts(question_id);
 """
 
 
@@ -194,6 +225,60 @@ class PostgresStore:
             )
         return model
 
+    async def save_reviews(self, learner_id: str, items: dict[str, ReviewItem]) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM review_items WHERE learner_id=$1", learner_id
+                )
+                if items:
+                    await conn.executemany(
+                        """
+                        INSERT INTO review_items
+                            (learner_id, knowledge_id, easiness_factor, interval_days,
+                             repetition, next_review, last_review, total_reviews)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                        """,
+                        [
+                            (
+                                learner_id,
+                                item.knowledge_id,
+                                item.easiness_factor,
+                                item.interval_days,
+                                item.repetition,
+                                _utc(item.next_review),
+                                _utc(item.last_review),
+                                item.total_reviews,
+                            )
+                            for item in items.values()
+                        ],
+                    )
+
+    async def load_reviews(self, learner_id: str) -> dict[str, ReviewItem]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM review_items WHERE learner_id=$1", learner_id
+            )
+        result: dict[str, ReviewItem] = {}
+        for row in rows:
+            next_review = row["next_review"]
+            last_review = row["last_review"]
+            # Curriculum 的时钟是 naive datetime；去掉 tzinfo 保持同一套墙钟时间。
+            if next_review is not None and next_review.tzinfo is not None:
+                next_review = next_review.replace(tzinfo=None)
+            if last_review is not None and last_review.tzinfo is not None:
+                last_review = last_review.replace(tzinfo=None)
+            result[row["knowledge_id"]] = ReviewItem(
+                knowledge_id=row["knowledge_id"],
+                easiness_factor=row["easiness_factor"],
+                interval_days=row["interval_days"],
+                repetition=row["repetition"],
+                next_review=next_review,
+                last_review=last_review,
+                total_reviews=row["total_reviews"],
+            )
+        return result
+
     async def get_version(self, learner_id: str, knowledge_id: str) -> int:
         async with self.pool.acquire() as conn:
             value = await conn.fetchval(
@@ -229,6 +314,151 @@ class PostgresStore:
                 expected_version,
             )
         return status == "UPDATE 1"
+
+    # ── 题库与答题记录 ──
+    async def seed_questions(self, questions: list[Question]) -> int:
+        rows = [
+            (
+                question.id,
+                question.knowledge_id,
+                question.grade,
+                question.type.value,
+                question.stem,
+                json.dumps(question.options, ensure_ascii=False),
+                question.answer,
+                json.dumps(question.accepted, ensure_ascii=False),
+                question.explanation,
+                question.difficulty,
+                question.source,
+                question.version,
+            )
+            for question in questions
+        ]
+        if not rows:
+            return 0
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(
+                    """
+                    INSERT INTO questions
+                        (id, knowledge_id, grade, type, stem, options, answer,
+                         accepted, explanation, difficulty, source, version)
+                    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9,$10,$11,$12)
+                    ON CONFLICT (id) DO UPDATE SET
+                        knowledge_id=excluded.knowledge_id,
+                        grade=excluded.grade,
+                        type=excluded.type,
+                        stem=excluded.stem,
+                        options=excluded.options,
+                        answer=excluded.answer,
+                        accepted=excluded.accepted,
+                        explanation=excluded.explanation,
+                        difficulty=excluded.difficulty,
+                        source=excluded.source,
+                        version=excluded.version
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    @staticmethod
+    def _question_from_row(row: Any) -> Question:
+        options = row["options"]
+        accepted = row["accepted"]
+        if isinstance(options, str):
+            options = json.loads(options)
+        if isinstance(accepted, str):
+            accepted = json.loads(accepted)
+        return Question(
+            id=row["id"],
+            knowledge_id=row["knowledge_id"],
+            grade=row["grade"],
+            type=QuestionType(row["type"]),
+            stem=row["stem"],
+            options=list(options or []),
+            answer=row["answer"],
+            accepted=list(accepted or []),
+            explanation=row["explanation"],
+            difficulty=row["difficulty"],
+            source=row["source"],
+            version=row["version"],
+        )
+
+    async def get_question(self, question_id: str) -> Question | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM questions WHERE id=$1", question_id
+            )
+        return self._question_from_row(row) if row else None
+
+    async def list_questions(
+        self,
+        knowledge_id: str | None = None,
+        grade: int | None = None,
+        limit: int = 100,
+    ) -> list[Question]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if knowledge_id:
+            params.append(knowledge_id)
+            clauses.append(f"knowledge_id=${len(params)}")
+        if grade is not None:
+            params.append(grade)
+            clauses.append(f"grade=${len(params)}")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(limit, 500)))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM questions {where} "
+                f"ORDER BY grade, difficulty, id LIMIT ${len(params)}",
+                *params,
+            )
+        return [self._question_from_row(row) for row in rows]
+
+    async def save_attempt(self, attempt: Attempt) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO attempts
+                    (id, learner_id, question_id, knowledge_id, answer,
+                     is_correct, time_spent_seconds, created_at)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                """,
+                attempt.id,
+                attempt.learner_id,
+                attempt.question_id,
+                attempt.knowledge_id,
+                attempt.answer,
+                attempt.is_correct,
+                attempt.time_spent_seconds,
+                _utc(attempt.created_at),
+            )
+
+    async def list_attempts(self, learner_id: str, limit: int = 50) -> list[Attempt]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM attempts
+                WHERE learner_id=$1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                learner_id,
+                max(1, min(limit, 500)),
+            )
+        return [
+            Attempt(
+                id=row["id"],
+                learner_id=row["learner_id"],
+                question_id=row["question_id"],
+                knowledge_id=row["knowledge_id"],
+                answer=row["answer"],
+                is_correct=bool(row["is_correct"]),
+                time_spent_seconds=row["time_spent_seconds"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     # ── 事件 ──
     async def append_event(self, event: Event) -> None:

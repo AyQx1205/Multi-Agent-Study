@@ -32,6 +32,8 @@ async def main() -> None:
         reply = await llm.complete(
             "你是一位苏格拉底式数学老师。只问一个问题，不要给答案。",
             "学生问：为什么负负得正？",
+            max_tokens=600,
+            temperature=0.3,
         )
         print(f"reply    = {reply}")
     finally:

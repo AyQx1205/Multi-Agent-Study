@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.orchestrator import QuestionNotFoundError
+
 logger = logging.getLogger(__name__)
 ws_router = APIRouter()
 
@@ -57,19 +59,38 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
             orch = websocket.app.state.orchestrator
 
             if action == "submit":
-                knowledge_id = str(data.get("knowledge_id") or "")
-                if not knowledge_id:
-                    await manager.send(learner_id, {"error": "knowledge_id required"})
+                question_id = str(data.get("question_id") or "")
+                answer = str(data.get("answer") or "")
+                if not question_id or not answer:
+                    await manager.send(
+                        learner_id, {"error": "question_id and answer required"}
+                    )
                     continue
                 try:
                     time_spent = float(data.get("time_spent_seconds", 0) or 0)
                 except (TypeError, ValueError):
                     time_spent = 0.0
-                events = await orch.submit_answer(
+                try:
+                    events, attempt = await orch.submit_question(
+                        learner_id,
+                        question_id,
+                        answer,
+                        time_spent,
+                    )
+                except QuestionNotFoundError:
+                    await manager.send(learner_id, {"error": "question not found"})
+                    continue
+                question = await orch.get_question(question_id)
+                await manager.send(
                     learner_id,
-                    knowledge_id,
-                    bool(data.get("is_correct", False)),
-                    time_spent,
+                    {
+                        "event_type": "submission.result",
+                        "question_id": attempt.question_id,
+                        "knowledge_id": attempt.knowledge_id,
+                        "is_correct": attempt.is_correct,
+                        "correct_answer": question.answer if question else None,
+                        "explanation": question.explanation if question else "",
+                    },
                 )
             elif action == "question":
                 knowledge_id = str(data.get("knowledge_id") or "")

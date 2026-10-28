@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
+from app.core.content import Attempt, Question, QuestionType
 from app.core.events import Event, EventType
 from app.core.learner_model import LearnerModel
+from app.core.spaced_repetition import ReviewItem
 from app.store import SqliteStore
 
 
@@ -71,3 +75,73 @@ def test_events_survive_reopen(tmp_path) -> None:
     assert restored[0].data["response"] == "先看条件？"
     assert restored[0].correlation_id == "c1"
     second.close()
+
+
+def test_reviews_survive_reopen(tmp_path) -> None:
+    path = tmp_path / "reviews.db"
+    now = datetime.now()
+    item = ReviewItem(
+        knowledge_id="arithmetic",
+        easiness_factor=2.3,
+        interval_days=6,
+        repetition=2,
+        next_review=now + timedelta(days=6),
+        last_review=now,
+        total_reviews=2,
+    )
+
+    first = SqliteStore(path)
+    first.save_model(LearnerModel("s1"))
+    first.save_reviews("s1", {"arithmetic": item})
+    first.close()
+
+    second = SqliteStore(path)
+    restored = second.load_reviews("s1")["arithmetic"]
+    assert restored.knowledge_id == "arithmetic"
+    assert restored.interval_days == 6
+    assert restored.repetition == 2
+    assert restored.total_reviews == 2
+    assert restored.next_review == item.next_review
+    second.close()
+
+
+def test_question_bank_roundtrip(tmp_path) -> None:
+    store = make_store(tmp_path)
+    question = Question(
+        id="q-demo-1",
+        knowledge_id="linear_eq",
+        grade=7,
+        type=QuestionType.CHOICE,
+        stem="2x=4，x=?",
+        options=["1", "2", "3", "4"],
+        answer="B",
+        explanation="两边除以 2。",
+        difficulty=1,
+    )
+    assert store.seed_questions([question]) == 1
+    # 幂等
+    assert store.seed_questions([question]) == 1
+    assert store.get_question(question.id) == question
+    assert store.list_questions(knowledge_id="linear_eq", grade=7)[0].id == question.id
+    assert store.list_questions(knowledge_id="missing") == []
+    store.close()
+
+
+def test_attempts_roundtrip(tmp_path) -> None:
+    store = make_store(tmp_path)
+    attempt = Attempt(
+        learner_id="s1",
+        question_id="q-demo-1",
+        knowledge_id="linear_eq",
+        answer="B",
+        is_correct=True,
+        time_spent_seconds=8.5,
+    )
+    store.save_attempt(attempt)
+    restored = store.list_attempts("s1")
+    assert len(restored) == 1
+    assert restored[0].question_id == "q-demo-1"
+    assert restored[0].is_correct is True
+    assert restored[0].time_spent_seconds == 8.5
+    assert store.list_attempts("nobody") == []
+    store.close()

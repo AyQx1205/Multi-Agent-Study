@@ -32,6 +32,13 @@ class CurriculumAgent(BaseAgent):
         self._recommended: dict[str, str] = {}
         super().__init__(*args, **kwargs)
 
+    # ── 复习状态的持久化入口（由 orchestrator 调用） ──
+    def export_reviews(self, learner_id: str) -> dict[str, ReviewItem]:
+        return dict(self._reviews.get(learner_id, {}))
+
+    def import_reviews(self, learner_id: str, items: dict[str, ReviewItem]) -> None:
+        self._reviews[learner_id] = dict(items)
+
     @property
     def subscribed_events(self) -> list[EventType]:
         return [

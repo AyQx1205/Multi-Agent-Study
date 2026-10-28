@@ -11,6 +11,7 @@ class KnowledgeNode(BaseModel):
     id:str = Field(description="节点ID")
     name:str = Field(description="节点名称")
     subject:str = Field(default="math", description="节点所属科目")
+    grade:int = Field(default=0, ge=0, le=9, description="年级；0 表示通用/样例")
     difficulty:float = Field(default=0.5, description="节点难度")
     prerequisites:list[str] = Field(default_factory=list, description="先修节点ID列表")
     tags:list[str] = Field(default_factory=list, description="节点标签列表")

@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.api.ws import ws_router
 from app.config import Settings, get_settings
+from app.content import build_junior_math_graph, build_junior_math_questions
 from app.llm.client import MockLLM, OpenAICompatibleLLM
 from app.orchestrator import AgentOrchestrator
 from app.store import SqliteStore
@@ -51,11 +52,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = SqliteStoreAdapter(SqliteStore(settings.sqlite_path))
         logger.info("persistence: sqlite (%s)", settings.sqlite_path)
 
+    graph = build_junior_math_graph()
+    seeded = await store.seed_questions(build_junior_math_questions())
+    logger.info("content ready: %d knowledge nodes, %d questions", len(graph.nodes), seeded)
+
     llm = build_llm(settings)
     app.state.orchestrator = AgentOrchestrator(
         llm=llm,
         settings=settings,
         store=store,
+        graph=graph,
     )
     watcher = asyncio.create_task(app.state.orchestrator.engagement.start_idle_watcher())
     logger.info("orchestrator ready (llm=%s)", "mock" if isinstance(llm, MockLLM) else settings.llm_model)

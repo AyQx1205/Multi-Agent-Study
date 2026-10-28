@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+
+from app.content import content_summary
+from app.orchestrator import QuestionNotFoundError
 
 router = APIRouter(tags=["education"])
 
 
 class SubmitAnswerRequest(BaseModel):
-    learner_id: str = Field(min_length=1)
-    knowledge_id: str = Field(min_length=1)
-    is_correct: bool
+    learner_id: str = Field(min_length=1, max_length=80)
+    question_id: str = Field(min_length=1, max_length=80)
+    answer: str = Field(min_length=1, max_length=200)
     time_spent_seconds: float = Field(default=0, ge=0, le=3600)
 
 
@@ -49,17 +52,56 @@ async def health_check(request: Request) -> dict[str, Any]:
         "service": "multi-agent-lite",
         "agents": len(agents),
         "storage": orch.store.name if orch.store else "memory",
+        "content": content_summary(),
     }
+
+
+@router.get("/questions")
+async def list_questions(
+    request: Request,
+    knowledge_id: str | None = None,
+    grade: int | None = Query(default=None, ge=1, le=9),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    orch = request.app.state.orchestrator
+    questions = await orch.get_questions(knowledge_id, grade, limit)
+    return {
+        "count": len(questions),
+        "items": [question.public_dict() for question in questions],
+    }
+
+
+@router.get("/questions/{question_id}")
+async def get_question(question_id: str, request: Request) -> dict[str, Any]:
+    orch = request.app.state.orchestrator
+    question = await orch.get_question(question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    return question.public_dict()
 
 
 @router.post("/submit")
 async def submit_answer(req: SubmitAnswerRequest, request: Request) -> dict[str, Any]:
     orch = request.app.state.orchestrator
-    events = await orch.submit_answer(
-        req.learner_id, req.knowledge_id, req.is_correct, req.time_spent_seconds
-    )
+    try:
+        events, attempt = await orch.submit_question(
+            req.learner_id,
+            req.question_id,
+            req.answer,
+            req.time_spent_seconds,
+        )
+    except QuestionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="question not found") from exc
+
+    question = await orch.get_question(req.question_id)
     return {
         "status": "processed",
+        "attempt_id": attempt.id,
+        "question_id": attempt.question_id,
+        "knowledge_id": attempt.knowledge_id,
+        "is_correct": attempt.is_correct,
+        "correct_answer": question.answer if question else None,
+        "explanation": question.explanation if question else "",
         "events_triggered": len(events),
         "events": _serialize(events),
         "correlation_id": events[-1].correlation_id if events else None,
@@ -108,14 +150,42 @@ async def get_events(learner_id: str, request: Request, limit: int = 50) -> dict
     return {"learner_id": learner_id, "events": _serialize(events, limit=len(events))}
 
 
+@router.get("/attempts/{learner_id}")
+async def get_attempts(
+    learner_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    orch = request.app.state.orchestrator
+    attempts = await orch.get_attempts(learner_id, limit)
+    return {
+        "learner_id": learner_id,
+        "count": len(attempts),
+        "items": [
+            {
+                "id": attempt.id,
+                "question_id": attempt.question_id,
+                "knowledge_id": attempt.knowledge_id,
+                "answer": attempt.answer,
+                "is_correct": attempt.is_correct,
+                "time_spent_seconds": attempt.time_spent_seconds,
+                "created_at": attempt.created_at.isoformat(),
+            }
+            for attempt in attempts
+        ],
+    }
+
+
 @router.get("/knowledge-graph")
 async def get_knowledge_graph(request: Request) -> dict[str, Any]:
     graph = request.app.state.orchestrator.curriculum.knowledge_graph
     return {
+        "subject": "math",
         "nodes": [
             {
                 "id": n.id,
                 "name": n.name,
+                "grade": n.grade,
                 "difficulty": n.difficulty,
                 "prerequisites": n.prerequisites,
                 "tags": n.tags,
