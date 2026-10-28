@@ -108,7 +108,10 @@ class EngagementAgent(BaseAgent):
         """后台定时器：解决「IDLE 只在答题时才判定」的死代码问题。"""
         while True:
             await asyncio.sleep(interval)
-            await self.check_idle()
+            try:
+                await self.check_idle()
+            except Exception:
+                logger.exception("[Engagement] idle watcher tick failed")
 
     async def check_idle(self, idle_threshold_seconds: float = 300) -> None:
         for eng in list(self._engagements.values()):
@@ -138,13 +141,15 @@ class EngagementAgent(BaseAgent):
         if state is not previous:
             logger.info("[Engagement] %s: %s -> %s", event.learner_id, previous.value, state.value)
 
-        if state is LearningState.FRUSTRATED:
-            await self._intervene_frustration(event.learner_id, eng, event.correlation_id)
-        elif state is LearningState.BORED:
-            await self._intervene_boredom(event.learner_id, eng, event.correlation_id)
-        elif state is LearningState.FATIGUED:
-            await self._intervene_fatigue(event.learner_id, eng, event.correlation_id)
-        elif state is LearningState.FOCUSED and eng.consecutive_correct >= 3:
+        if state is not previous:
+            if state is LearningState.FRUSTRATED:
+                await self._intervene_frustration(event.learner_id, eng, event.correlation_id)
+            elif state is LearningState.BORED:
+                await self._intervene_boredom(event.learner_id, eng, event.correlation_id)
+            elif state is LearningState.FATIGUED:
+                await self._intervene_fatigue(event.learner_id, eng, event.correlation_id)
+
+        if state is LearningState.FOCUSED and eng.consecutive_correct >= 3:
             await self._encourage(event.learner_id, eng, event.correlation_id)
 
     def _detect_state(self, eng: LearnerEngagement) -> LearningState:

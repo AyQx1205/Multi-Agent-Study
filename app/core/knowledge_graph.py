@@ -15,7 +15,7 @@ class KnowledgeNode(BaseModel):
     prerequisites:list[str] = Field(default_factory=list, description="先修节点ID列表")
     tags:list[str] = Field(default_factory=list, description="节点标签列表")
 
-class KnowledgeGraph(BaseModel):
+class KnowledgeGraph:
     def __init__(self) -> None:
         self.nodes:dict[str,KnowledgeNode] = {}
         self._succ:dict[str,list[str]] = {}
@@ -41,7 +41,7 @@ class KnowledgeGraph(BaseModel):
     def get_successors(self, node_id:str) -> list[str]:
         return self._succ.get(node_id,[])
 
-    def get_all_prerequisites(self, node_id:str) -> list[str]:
+    def get_all_prerequisites(self, node_id:str) -> set[str]:
         visited: set[str] = set()
         queue = deque(self.get_prerequisites(node_id))
         while queue:
@@ -49,7 +49,7 @@ class KnowledgeGraph(BaseModel):
             if current not in visited:
                 visited.add(current)
                 queue.extend(self.get_prerequisites(current))
-        return list(visited)
+        return visited
 
     def topological_sort(self) -> list[str]:
         in_degree = {nid: 0 for nid in self.nodes}
@@ -74,8 +74,8 @@ class KnowledgeGraph(BaseModel):
 
     def get_ready_nodes(self, mastered_ids: set[str]) -> list[str]:
         ready = [
-            nid 
-            for nid,node in self.nodes.items() 
+            nid
+            for nid,node in self.nodes.items()
             if nid not in mastered_ids and set(node.prerequisites).issubset(mastered_ids)
         ]
         return sorted(ready,key=lambda nid: (self.nodes[nid].difficulty,nid))
@@ -87,35 +87,35 @@ class KnowledgeGraph(BaseModel):
         if target_id not in mastered_ids:
             needed.add(target_id)
         return [nid for nid in self.topological_sort() if nid in needed]
-                
-    def build_sample_math_graph() -> KnowledgeGraph:
-    
-        graph = KnowledgeGraph()
-        rows = [
-            ("arithmetic", "四则运算", 0.10, [], ["基础"]),
-            ("fractions", "分数运算", 0.20, ["arithmetic"], ["基础"]),
-            ("negative_numbers", "负数", 0.15, ["arithmetic"], ["基础"]),
-            ("algebraic_expr", "代数式", 0.30, ["arithmetic", "negative_numbers"], ["代数"]),
-            ("linear_eq_1", "一元一次方程", 0.35, ["algebraic_expr"], ["方程"]),
-            ("linear_eq_2", "二元一次方程组", 0.45, ["linear_eq_1"], ["方程"]),
-            ("factoring", "因式分解", 0.40, ["algebraic_expr"], ["代数"]),
-            ("quadratic_eq", "一元二次方程", 0.55, ["factoring", "linear_eq_1"], ["方程"]),
-            ("quadratic_func", "二次函数", 0.60, ["quadratic_eq"], ["函数"]),
-            ("inequality", "不等式", 0.40, ["linear_eq_1"], ["不等式"]),
-            ("coordinate", "平面直角坐标系", 0.30, ["negative_numbers"], ["几何"]),
-            ("linear_func", "一次函数", 0.45, ["linear_eq_1", "coordinate"], ["函数"]),
-            ("pythagorean", "勾股定理", 0.35, ["arithmetic"], ["几何"]),
-            ("similar_triangle", "相似三角形", 0.50, ["pythagorean", "fractions"], ["几何"]),
-            ("trig_basic", "三角函数基础", 0.55, ["pythagorean", "fractions"], ["三角"]),
-            ("probability", "概率初步", 0.40, ["fractions"], ["统计"]),
-            ("statistics", "数据统计", 0.35, ["arithmetic", "fractions"], ["统计"]),
-            ("sequence", "数列", 0.50, ["algebraic_expr"], ["代数"]),
-            ("sets", "集合", 0.25, ["arithmetic"], ["基础"]),
-            ("logic", "简易逻辑", 0.30, ["sets"], ["基础"]),
-        ]
-        for nid,name,difficulty,prerequisites,tags in rows:
-            graph.add_node(
-                KnowledgeNode(id=nid,name=name,difficulty=difficulty,prerequisites=prerequisites,tags=tags)
-            )
-        logger.info("sample math graph built with %d nodes", len(graph.nodes))
-        return graph
+
+def build_sample_math_graph() -> KnowledgeGraph:
+
+    graph = KnowledgeGraph()
+    rows = [
+        ("arithmetic", "四则运算", 0.10, [], ["基础"]),
+        ("fractions", "分数运算", 0.20, ["arithmetic"], ["基础"]),
+        ("negative_numbers", "负数", 0.15, ["arithmetic"], ["基础"]),
+        ("algebraic_expr", "代数式", 0.30, ["arithmetic", "negative_numbers"], ["代数"]),
+        ("linear_eq_1", "一元一次方程", 0.35, ["algebraic_expr"], ["方程"]),
+        ("linear_eq_2", "二元一次方程组", 0.45, ["linear_eq_1"], ["方程"]),
+        ("factoring", "因式分解", 0.40, ["algebraic_expr"], ["代数"]),
+        ("quadratic_eq", "一元二次方程", 0.55, ["factoring", "linear_eq_1"], ["方程"]),
+        ("quadratic_func", "二次函数", 0.60, ["quadratic_eq"], ["函数"]),
+        ("inequality", "不等式", 0.40, ["linear_eq_1"], ["不等式"]),
+        ("coordinate", "平面直角坐标系", 0.30, ["negative_numbers"], ["几何"]),
+        ("linear_func", "一次函数", 0.45, ["linear_eq_1", "coordinate"], ["函数"]),
+        ("pythagorean", "勾股定理", 0.35, ["arithmetic"], ["几何"]),
+        ("similar_triangle", "相似三角形", 0.50, ["pythagorean", "fractions"], ["几何"]),
+        ("trig_basic", "三角函数基础", 0.55, ["pythagorean", "fractions"], ["三角"]),
+        ("probability", "概率初步", 0.40, ["fractions"], ["统计"]),
+        ("statistics", "数据统计", 0.35, ["arithmetic", "fractions"], ["统计"]),
+        ("sequence", "数列", 0.50, ["algebraic_expr"], ["代数"]),
+        ("sets", "集合", 0.25, ["arithmetic"], ["基础"]),
+        ("logic", "简易逻辑", 0.30, ["sets"], ["基础"]),
+    ]
+    for nid,name,difficulty,prerequisites,tags in rows:
+        graph.add_node(
+            KnowledgeNode(id=nid,name=name,difficulty=difficulty,prerequisites=prerequisites,tags=tags)
+        )
+    logger.info("sample math graph built with %d nodes", len(graph.nodes))
+    return graph

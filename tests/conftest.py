@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import os
+
+# 单元测试不连真实数据库：强制走内存 SQLite，避免读到 .env 里的 PostgreSQL。
+# PostgreSQL 集成测试单独用 TEST_DATABASE_URL（见 tests/test_store_postgres.py）。
+os.environ["DATABASE_URL"] = ""
+os.environ["SQLITE_PATH"] = ":memory:"
+
 from datetime import datetime
 
 import pytest

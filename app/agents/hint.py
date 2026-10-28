@@ -83,7 +83,7 @@ class HintAgent(BaseAgent):
                 "knowledge_id": knowledge_id,
                 "hint_level": level,
                 "hint_level_name": LEVEL_NAMES[level],
-                "hint_text": f"关于知识点 {knowledge_id} 的提示： {body}",
+                "hint_text": f"关于「{knowledge_id}」的提示：{body}",
                 "hint_count": self._hint_history[key],
                 "description": HINT_TEMPLATES[level]["description"],
             },

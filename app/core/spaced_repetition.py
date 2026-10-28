@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 MIN_EF = 1.3
-MAX_EF = 3.0
+MAX_EF = 2.5
 
 class ReviewItem(BaseModel):
     knowledge_id: str = Field(description="复习知识点id")

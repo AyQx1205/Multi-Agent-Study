@@ -49,7 +49,7 @@ class Event(BaseModel):
     source: str = Field(description="事件来源")
     learner_id: str = Field(description="学习者ID")
     timestamp: datetime = Field(default_factory=datetime.now,description="事件时间戳")
-    data: dict = Field(default_factory=dict,description="事件数据")
+    data: dict[str, Any] = Field(default_factory=dict,description="事件数据")
     correlation_id: str | None = Field(None,description="事件关联ID")
 
 EventHandler = Callable[[Event], Awaitable[None]]
@@ -118,6 +118,8 @@ class EventBus:
                 events = [e for e in events if e.type == event_type]
             if correlation_id:
                 events = [e for e in events if e.correlation_id == correlation_id]
+            if limit <= 0:
+                return []
             return events[-limit:]
 
     def clear_history(self) -> None:

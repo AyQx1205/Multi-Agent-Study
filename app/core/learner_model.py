@@ -20,14 +20,14 @@ class KnowledgeState(BaseModel):
     knowledge_id: str = Field(description="知识ID")
     mastery:float = 0.1
     alpha:float = 1.0
-    bata:float = 0.9
+    beta:float = 9.0
     attempts:int = 0
     correct_count:int = 0
     streak:int = 0
     last_attempt:datetime | None = None
 
     @property
-    def mastery_level(self) -> MasteryLevel:
+    def level(self) -> MasteryLevel:
         if self.attempts == 0:
             return MasteryLevel.NOT_STARTED
         elif self.mastery < 0.3:
@@ -41,7 +41,7 @@ class KnowledgeState(BaseModel):
 
     @property
     def confidence(self) -> float:
-        return min(1.0, (self.alpha + self.bata) / 20.0)
+        return min(1.0, (self.alpha + self.beta) / 20.0)
 
 class BKTParams(BaseModel):
     p_init:float = 0.1
@@ -50,7 +50,7 @@ class BKTParams(BaseModel):
     p_slip:float = 0.1
 
 class LearnerModel:
-    def __init__(self, learner_id: str, bkt_params: BKPParams | None = None) -> None:
+    def __init__(self, learner_id: str, bkt_params: BKTParams | None = None) -> None:
         self.learner_id = learner_id
         self.bkt = bkt_params or BKTParams()
         self.knowledge_states: dict[str, KnowledgeState] = {}
@@ -62,6 +62,10 @@ class LearnerModel:
         if knowledge_id not in self.knowledge_states:
             self.knowledge_states[knowledge_id] = KnowledgeState(knowledge_id=knowledge_id,mastery=self.bkt.p_init)
         return self.knowledge_states[knowledge_id]
+
+    def peek_state(self, knowledge_id: str) -> KnowledgeState | None:
+        """只读查询：不会为提问/闲聊创建“幻觉知识点”。"""
+        return self.knowledge_states.get(knowledge_id)
 
     def update_mastery(self, knowledge_id: str, is_correct: bool) -> KnowledgeState:
         state = self.get_state(knowledge_id)
@@ -102,7 +106,8 @@ class LearnerModel:
         if not states:
             return {
                 "total_knowledge_points": 0,
-                "avg_attempts": 0.0,
+                "avg_mastery": 0.0,
+                "total_attempts": 0,
                 "total_correct": 0,
                 "accuracy": 0.0,
                 "level_distribution": {},
@@ -116,7 +121,7 @@ class LearnerModel:
         correct = sum(s.correct_count for s in states)
         return {
             "total_knowledge_points": len(states),
-            "avg_attempts": round(sum(s.mastery for s in states) / len(states),4),
+            "avg_mastery": round(sum(s.mastery for s in states) / len(states),4),
             "total_attempts": attempts,
             "total_correct": correct,
             "accuracy": round(correct / attempts,4) if attempts > 0 else 0.0,
@@ -126,7 +131,7 @@ class LearnerModel:
     def to_dict(self) -> dict[str, Any]:
         return {
             "learner_id": self.learner_id,
-            "knowledge_states": {kid:s.model_dump() for kid,s in self.knowledge_states.items()},
+            "knowledge_states": {kid:s.model_dump(mode="json") for kid,s in self.knowledge_states.items()},
             "total_interactions": self.total_interactions,
             "session_start": self.session_start.isoformat(),
             "metadata": self.metadata,
@@ -139,5 +144,8 @@ class LearnerModel:
             model.knowledge_states[kid] = KnowledgeState(**raw)
         model.total_interactions = payload.get("total_interactions",0)
         model.metadata = payload.get("metadata",{})
+        started = payload.get("session_start")
+        if started:
+            model.session_start = datetime.fromisoformat(started)
         return model
         

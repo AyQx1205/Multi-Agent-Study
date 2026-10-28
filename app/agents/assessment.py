@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.agents.base import BaseAgent
 from app.core.events import Event, EventType
@@ -12,6 +13,17 @@ WEAKNESS_MIN_ATTEMPTS = 3
 
 
 class AssessmentAgent(BaseAgent):
+    def __init__(
+        self,
+        *args: Any,
+        weakness_threshold: float = WEAKNESS_THRESHOLD,
+        weakness_min_attempts: int = WEAKNESS_MIN_ATTEMPTS,
+        **kwargs: Any,
+    ) -> None:
+        self._weakness_threshold = weakness_threshold
+        self._weakness_min_attempts = weakness_min_attempts
+        super().__init__(*args, **kwargs)
+
     @property
     def subscribed_events(self) -> list[EventType]:
         return [EventType.STUDENT_SUBMISSION, EventType.STUDENT_QUESTION]
@@ -58,7 +70,7 @@ class AssessmentAgent(BaseAgent):
             correlation_id=cid,
         )
 
-        if state.mastery < WEAKNESS_THRESHOLD and state.attempts >= WEAKNESS_MIN_ATTEMPTS:
+        if state.mastery < self._weakness_threshold and state.attempts >= self._weakness_min_attempts:
             await self.emit(
                 EventType.WEAKNESS_DETECTED,
                 learner_id,
@@ -88,7 +100,9 @@ class AssessmentAgent(BaseAgent):
         learner_id = event.learner_id
         knowledge_id = event.data.get("knowledge_id", "general")
         model = self.get_learner_model(learner_id)
-        state = model.get_state(knowledge_id)
+        state = model.peek_state(knowledge_id)
+        mastery = state.mastery if state else model.bkt.p_init
+        level = state.level.value if state else "not_started"
 
         await self.emit(
             EventType.ASSESSMENT_COMPLETE,
@@ -97,8 +111,8 @@ class AssessmentAgent(BaseAgent):
                 "knowledge_id": knowledge_id,
                 "question": event.data.get("question", ""),
                 "is_correct": None,
-                "mastery": round(state.mastery, 4),
-                "level": state.level.value,
+                "mastery": round(mastery, 4),
+                "level": level,
                 "context": "student_question",
                 "overall_progress": model.get_overall_progress(),
             },

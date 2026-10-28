@@ -44,7 +44,12 @@ def _serialize(events: list[Any], limit: int = 20) -> list[dict[str, Any]]:
 async def health_check(request: Request) -> dict[str, Any]:
     orch = request.app.state.orchestrator
     agents = [orch.assessment, orch.tutor, orch.curriculum, orch.hint, orch.engagement]
-    return {"status": "ok", "service": "multi-agent-lite", "agents": len(agents)}
+    return {
+        "status": "ok",
+        "service": "multi-agent-lite",
+        "agents": len(agents),
+        "storage": orch.store.name if orch.store else "memory",
+    }
 
 
 @router.post("/submit")
@@ -65,25 +70,41 @@ async def submit_answer(req: SubmitAnswerRequest, request: Request) -> dict[str,
 async def ask_question(req: AskQuestionRequest, request: Request) -> dict[str, Any]:
     orch = request.app.state.orchestrator
     events = await orch.ask_question(req.learner_id, req.knowledge_id, req.question)
-    return {"status": "processed", "events_triggered": len(events), "events": _serialize(events)}
+    return {
+        "status": "processed",
+        "events_triggered": len(events),
+        "events": _serialize(events),
+        "correlation_id": events[-1].correlation_id if events else None,
+    }
 
 
 @router.post("/message")
 async def send_message(req: SendMessageRequest, request: Request) -> dict[str, Any]:
     orch = request.app.state.orchestrator
     events = await orch.send_message(req.learner_id, req.message, req.knowledge_id)
-    return {"status": "processed", "events_triggered": len(events), "events": _serialize(events)}
+    return {
+        "status": "processed",
+        "events_triggered": len(events),
+        "events": _serialize(events),
+        "correlation_id": events[-1].correlation_id if events else None,
+    }
 
 
 @router.get("/progress/{learner_id}")
 async def get_progress(learner_id: str, request: Request) -> dict[str, Any]:
-    return request.app.state.orchestrator.get_learner_progress(learner_id)
+    orch = request.app.state.orchestrator
+    await orch.ensure_learner(learner_id)
+    return orch.get_learner_progress(learner_id)
 
 
 @router.get("/events/{learner_id}")
 async def get_events(learner_id: str, request: Request, limit: int = 50) -> dict[str, Any]:
-    bus = request.app.state.orchestrator.event_bus
-    events = bus.get_history(learner_id=learner_id, limit=min(limit, 200))
+    orch = request.app.state.orchestrator
+    limit = max(1, min(limit, 200))
+    if orch.store is not None:
+        events = await orch.store.get_events(learner_id, limit)
+    else:
+        events = orch.event_bus.get_history(learner_id=learner_id, limit=limit)
     return {"learner_id": learner_id, "events": _serialize(events, limit=len(events))}
 
 

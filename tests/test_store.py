@@ -49,3 +49,25 @@ def test_event_append_is_idempotent(tmp_path) -> None:
     store.append_event(event)
     assert store.count_events() == 1
     store.close()
+
+
+def test_events_survive_reopen(tmp_path) -> None:
+    path = tmp_path / "reopen.db"
+    first = SqliteStore(path)
+    event = Event(
+        type=EventType.TEACHING_RESPONSE,
+        source="t",
+        learner_id="s1",
+        data={"response": "先看条件？"},
+        correlation_id="c1",
+    )
+    first.append_event(event)
+    first.close()
+
+    second = SqliteStore(path)
+    restored = second.get_events("s1")
+    assert len(restored) == 1
+    assert restored[0].id == event.id
+    assert restored[0].data["response"] == "先看条件？"
+    assert restored[0].correlation_id == "c1"
+    second.close()

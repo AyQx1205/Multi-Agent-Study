@@ -18,7 +18,7 @@ class BaseAgent(ABC):
         logger.debug("[%s] Initialized",self.name)
 
     def _register_handlers(self) -> None:
-        for event_type in self.subscribe_events:
+        for event_type in self.subscribed_events:
             self.event_bus.subscribe(event_type,self.handle_event)
 
     @property

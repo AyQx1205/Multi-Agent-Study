@@ -47,4 +47,4 @@ async def test_leaky_output_is_replaced() -> None:
     events = await orch.send_message("s1", "直接告诉我答案", "arithmetic")
     response = [e for e in events if e.type is EventType.TEACHING_RESPONSE][-1].data["response"]
     assert "答案是" not in response
-    assert "?" in response
+    assert "？" in response

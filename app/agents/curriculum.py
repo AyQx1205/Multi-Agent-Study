@@ -21,12 +21,15 @@ class CurriculumAgent(BaseAgent):
         graph: KnowledgeGraph | None = None,
         sr: SpacedRepetition | None = None,
         clock: Callable[[], datetime] | None = None,
+        mastery_threshold: float = MASTERY_THRESHOLD,
         **kwargs: Any,
     ) -> None:
         self.knowledge_graph = graph or build_sample_math_graph()
         self.sr = sr or SpacedRepetition()
         self._clock = clock or datetime.now
+        self._mastery_threshold = mastery_threshold
         self._reviews: dict[str, dict[str, ReviewItem]] = {}
+        self._recommended: dict[str, str] = {}
         super().__init__(*args, **kwargs)
 
     @property
@@ -53,7 +56,7 @@ class CurriculumAgent(BaseAgent):
 
         self._apply_review(learner_id, knowledge_id, self._mastery_to_quality(mastery))
 
-        if mastery >= MASTERY_THRESHOLD:
+        if mastery >= self._mastery_threshold:
             await self._recommend_next(learner_id, event.correlation_id)
 
         await self._send_schedule(learner_id, event.correlation_id)
@@ -90,7 +93,7 @@ class CurriculumAgent(BaseAgent):
         return {
             state.knowledge_id
             for state in model.knowledge_states.values()
-            if state.mastery >= MASTERY_THRESHOLD
+            if state.mastery >= self._mastery_threshold
         }
 
     async def _recommend_next(self, learner_id: str, correlation_id: str | None) -> None:
@@ -98,6 +101,9 @@ class CurriculumAgent(BaseAgent):
         if not ready:
             return
         next_id = ready[0]
+        if self._recommended.get(learner_id) == next_id:
+            return
+        self._recommended[learner_id] = next_id
         node = self.knowledge_graph.nodes[next_id]
         await self.emit(
             EventType.NEXT_TOPIC,
@@ -126,7 +132,7 @@ class CurriculumAgent(BaseAgent):
             learner_id,
             {
                 "due_now": [
-                    {"knowledge_id": item.knowledge_id, "overdue_days": round(item.overdue_days, 1)}
+                    {"knowledge_id": item.knowledge_id, "overdue_days": round(item.overdue_days(now), 1)}
                     for item in due[:5]
                 ],
                 "weekly_schedule": schedule,
