@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
 
 from app.core.content import Attempt, Question, QuestionType
 from app.core.events import Event, EventType
@@ -9,12 +14,20 @@ from app.core.spaced_repetition import ReviewItem
 from app.store import SqliteStore
 
 
-def make_store(tmp_path) -> SqliteStore:
-    return SqliteStore(tmp_path / "test.db")
+@pytest.fixture
+def store_path():
+    """不用 pytest 的 tmp_path：部分 Windows 沙箱对 pytest-of-* 目录有 ACL 限制。"""
+    fd, raw_path = tempfile.mkstemp(prefix="multiagent-store-", suffix=".db")
+    os.close(fd)
+    path = Path(raw_path)
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
-def test_save_and_load_model(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_save_and_load_model(store_path) -> None:
+    store = SqliteStore(store_path)
     model = LearnerModel("s1")
     model.update_mastery("arithmetic", True)
     store.save_model(model)
@@ -26,14 +39,14 @@ def test_save_and_load_model(tmp_path) -> None:
     store.close()
 
 
-def test_load_unknown_returns_none(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_load_unknown_returns_none(store_path) -> None:
+    store = SqliteStore(store_path)
     assert store.load_model("nobody") is None
     store.close()
 
 
-def test_optimistic_lock(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_optimistic_lock(store_path) -> None:
+    store = SqliteStore(store_path)
     model = LearnerModel("s1")
     model.update_mastery("arithmetic", True)
     store.save_model(model)
@@ -46,8 +59,8 @@ def test_optimistic_lock(tmp_path) -> None:
     store.close()
 
 
-def test_event_append_is_idempotent(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_event_append_is_idempotent(store_path) -> None:
+    store = SqliteStore(store_path)
     event = Event(type=EventType.ENCOURAGEMENT, source="t", learner_id="s1", data={"a": 1})
     store.append_event(event)
     store.append_event(event)
@@ -55,8 +68,8 @@ def test_event_append_is_idempotent(tmp_path) -> None:
     store.close()
 
 
-def test_events_survive_reopen(tmp_path) -> None:
-    path = tmp_path / "reopen.db"
+def test_events_survive_reopen(store_path) -> None:
+    path = store_path
     first = SqliteStore(path)
     event = Event(
         type=EventType.TEACHING_RESPONSE,
@@ -77,8 +90,8 @@ def test_events_survive_reopen(tmp_path) -> None:
     second.close()
 
 
-def test_reviews_survive_reopen(tmp_path) -> None:
-    path = tmp_path / "reviews.db"
+def test_reviews_survive_reopen(store_path) -> None:
+    path = store_path
     now = datetime.now()
     item = ReviewItem(
         knowledge_id="arithmetic",
@@ -105,8 +118,8 @@ def test_reviews_survive_reopen(tmp_path) -> None:
     second.close()
 
 
-def test_question_bank_roundtrip(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_question_bank_roundtrip(store_path) -> None:
+    store = SqliteStore(store_path)
     question = Question(
         id="q-demo-1",
         knowledge_id="linear_eq",
@@ -127,8 +140,8 @@ def test_question_bank_roundtrip(tmp_path) -> None:
     store.close()
 
 
-def test_attempts_roundtrip(tmp_path) -> None:
-    store = make_store(tmp_path)
+def test_attempts_roundtrip(store_path) -> None:
+    store = SqliteStore(store_path)
     attempt = Attempt(
         learner_id="s1",
         question_id="q-demo-1",
@@ -144,4 +157,43 @@ def test_attempts_roundtrip(tmp_path) -> None:
     assert restored[0].is_correct is True
     assert restored[0].time_spent_seconds == 8.5
     assert store.list_attempts("nobody") == []
+    store.close()
+
+
+def test_attempt_idempotency_key_is_unique_per_learner(store_path) -> None:
+    store = SqliteStore(store_path)
+    first = Attempt(
+        learner_id="s1",
+        question_id="q-demo-1",
+        knowledge_id="linear_eq",
+        answer="B",
+        is_correct=True,
+        idempotency_key="key-1",
+        request_fingerprint="fp-1",
+    )
+    duplicate = Attempt(
+        learner_id="s1",
+        question_id="q-demo-1",
+        knowledge_id="linear_eq",
+        answer="B",
+        is_correct=True,
+        idempotency_key="key-1",
+        request_fingerprint="fp-1",
+    )
+    other_learner = Attempt(
+        learner_id="s2",
+        question_id="q-demo-1",
+        knowledge_id="linear_eq",
+        answer="B",
+        is_correct=True,
+        idempotency_key="key-1",
+        request_fingerprint="fp-1",
+    )
+    assert store.save_attempt(first) is True
+    assert store.save_attempt(duplicate) is False
+    assert store.save_attempt(other_learner) is True
+    restored = store.get_attempt_by_idempotency("s1", "key-1")
+    assert restored is not None
+    assert restored.id == first.id
+    assert len(store.list_attempts("s1")) == 1
     store.close()

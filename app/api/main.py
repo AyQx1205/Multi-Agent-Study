@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.api.ws import ws_router
 from app.config import Settings, get_settings
@@ -46,10 +47,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.database_url,
             min_size=settings.db_pool_min,
             max_size=settings.db_pool_max,
+            apply_schema=settings.auto_apply_schema,
         )
         logger.info("persistence: postgres")
     else:
-        store = SqliteStoreAdapter(SqliteStore(settings.sqlite_path))
+        store = SqliteStoreAdapter(
+            SqliteStore(
+                settings.sqlite_path,
+                apply_schema=settings.auto_apply_schema,
+            )
+        )
         logger.info("persistence: sqlite (%s)", settings.sqlite_path)
 
     graph = build_junior_math_graph()
@@ -84,5 +91,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(router)
 app.include_router(ws_router)

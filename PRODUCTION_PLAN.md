@@ -4,6 +4,26 @@
 > 默认假设：1 名全栈/AI 开发（20～25 小时/周）+ 1 名兼职数学教研 + 兼职设计/QA。
 > 如果全职 3～4 人，可压缩到 10～12 周；如果每周只能投入 10 小时，按 24 周排。
 
+## 当前实现状态（2026-10-29）
+
+本轮已落地 W2/W4 的核心后端：
+
+- 登录、退出、`/auth/me`，scrypt 密码哈希，可撤销的 Bearer 会话；
+- `organizations / users / classes / enrollments / auth_sessions`；
+- 学生-老师-管理员 RBAC，跨班级/跨学校访问 403；
+- `/submit` 的 `Idempotency-Key`、数据库唯一索引、重放不重复计分；
+- Alembic：
+  - `0001_baseline` 兼容存量表；
+  - `0002_auth_tenancy_idempotency` 新增认证/租户表和幂等列；
+- 提交事务一致性（P0-1）：
+  - `attempts + knowledge_states + review_items + events` 同一事务提交，Agent/DB 失败整笔回滚；
+  - PostgreSQL `pg_advisory_xact_lock(learner_id)` 串行化同一学生的多实例并发提交；
+  - SQLite 开发模式 `BEGIN IMMEDIATE` + 适配器锁；
+  - `/live` 与 `/ready`（数据库探测）探针；
+- 单元/集成测试覆盖登录、隔离、幂等、事务回滚、并发提交、迁移、SQLite/PostgreSQL。
+
+仍未完成：登录限流/锁定、OIDC/HttpOnly Cookie、审计日志、异步 Outbox/外部投递、CI/CD 中自动迁移、关闭启动时自动 DDL。详见 `README.md` 的“还没做的生产项”。
+
 ## 0. 先定边界（W1）
 
 只做：
@@ -27,7 +47,7 @@
 | 周 | 工作流 | 关键交付 | 验收标准 |
 |---|---|---|---|
 | W1 | 范围/需求 | PRD、指标、数据字典、试点意向 | 能一句话说清产品；有 3 个可量化指标 |
-| W2 | 身份/租户 | users/orgs/classes/enrollments、JWT、RBAC | 学生不能改 `learner_id`；跨租户访问 403 |
+| W2 | 身份/租户 | users/orgs/classes/enrollments、可撤销 Bearer 会话、RBAC | 学生不能改 `learner_id`；跨租户访问 403 |
 | W3 | 题库/判分 | questions/attempts 表、服务端判分、幂等提交 | 客户端不再传 `is_correct`；重复提交不重复加分 |
 | W4 | 迁移/一致性 | Alembic、事务、CAS/advisory lock | 启动不再自动建表；双实例并发写不丢数据 |
 | W3-W6 | 内容 | 60～100 个知识点、600～1000 道题、教研审核 | 每道题有答案/解析/难度/版本；抽检 95% 正确 |
@@ -61,8 +81,8 @@
 1. 认证/租户；
 2. 题库/判分/attempt；
 3. Alembic；
-4. 幂等与事务；
-5. 多实例锁/Outbox；
+4. 幂等与事务（已落地）；
+5. 多实例锁（已落地）/ 异步 Outbox；
 6. 报告查询。
 
 数据模型最小集：

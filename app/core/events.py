@@ -60,6 +60,8 @@ class EventBus:
         self._history: list[Event] = []
         self._lock = asyncio.Lock()
         self._depth = 0
+        # 同步提交期间，该 correlation 下的嵌套事件也必须把错误传回事务边界。
+        self._strict_correlations: set[str] = set()
 
     def subscribe(self, event_type: EventType, handler: EventHandler) -> None:
         self._subscribers.setdefault(event_type, []).append(handler)
@@ -70,8 +72,20 @@ class EventBus:
         if handlers and handler in handlers:
             handlers.remove(handler)
 
-    async def publish(self, event: Event) -> None:
+    def begin_strict(self, correlation_id: str) -> None:
+        self._strict_correlations.add(correlation_id)
+
+    def end_strict(self, correlation_id: str) -> None:
+        self._strict_correlations.discard(correlation_id)
+
+    async def publish(self, event: Event, *, raise_errors: bool = False) -> None:
+        strict = raise_errors or (
+            event.correlation_id is not None
+            and event.correlation_id in self._strict_correlations
+        )
         if self._depth >= MAX_DEPTH:
+            if strict:
+                raise RuntimeError("event depth limit reached during submission")
             logger.error(
                 "event depth limit reached (%s); drop %s from %s",
                 MAX_DEPTH,
@@ -92,17 +106,27 @@ class EventBus:
 
         self._depth += 1
         try:
-            await asyncio.gather(*(self._safe_call(h,event) for h in handlers))
+            results = await asyncio.gather(
+                *(self._safe_call(h, event) for h in handlers)
+            )
+            if strict:
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
         finally:
             self._depth -= 1
 
-    async def _safe_call(self, handler: EventHandler, event: Event) -> None:
+    async def _safe_call(
+        self, handler: EventHandler, event: Event
+    ) -> BaseException | None:
         try:
             await handler(event)
-        except Exception:
+            return None
+        except Exception as exc:
             logger.exception(
                 "handler error: %s -> %s", event.type.value, getattr(handler, "__name__", handler)
             )
+            return exc
 
     def get_history(
             self,

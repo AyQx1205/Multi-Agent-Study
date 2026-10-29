@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from datetime import datetime
@@ -9,10 +10,12 @@ from typing import Any, Callable
 from app.agents import AssessmentAgent, CurriculumAgent,EngagementAgent,HintAgent,TutorAgent
 from app.config import Settings, get_settings
 from app.core.content import Attempt, Question
+from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType,EventBus
 from app.core.grading import grade_answer
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.learner_model import LearnerModel
+from app.core.spaced_repetition import ReviewItem
 from app.llm.client import LLMClient
 from app.store_base import Store
 
@@ -39,6 +42,10 @@ class AgentOrchestrator:
         self._locks: dict[str, asyncio.Lock] = {}
         self.event_bus = EventBus()
         self.learner_models: dict[str,LearnerModel] = {}
+        # 提交事务期间，该学习者的事件先留在内存，由事务统一落库。
+        self._submission_cid: dict[str, str] = {}
+        # 提交期间产生的非本次事件（如 idle watcher），提交后补写。
+        self._deferred_events: dict[str, list[Event]] = {}
         if store is not None:
             # 所有事件都落库；append_event 以 event.id 去重
             for event_type in EventType:
@@ -71,11 +78,22 @@ class AgentOrchestrator:
 
     # ── 持久化：加载 / 保存 / 事件落库 ──
     def _lock(self, learner_id: str) -> asyncio.Lock:
-        """同一 learner 的写操作串行化（单进程内；多 worker 仍需 DB 乐观锁）。"""
+        """单进程内串行化同一 learner；跨进程/多实例由存储层 learner 锁兜底。"""
         return self._locks.setdefault(learner_id, asyncio.Lock())
 
     async def _persist_event(self, event: Event) -> None:
         if self.store is None:
+            return
+        # submit_transaction 会把整条事件链和 attempt/mastery 一起提交，
+        # 这里不能再逐条写库，否则会绕过事务边界。
+        active_cid = self._submission_cid.get(event.learner_id)
+        if active_cid is not None and event.correlation_id == active_cid:
+            # 本次提交的事件会随 attempt/mastery 一起原子落库。
+            return
+        if self._submission_cid:
+            # 只要还有提交事务未结束，其他学习者的事件也不能写 SQLite，
+            # 否则会和事务内的 adapter 锁互相等待。
+            self._deferred_events.setdefault(event.learner_id, []).append(event)
             return
         try:
             await self.store.append_event(event)
@@ -104,9 +122,44 @@ class AgentOrchestrator:
             )
 
     async def ensure_learner(self, learner_id: str) -> None:
-        """API 查询进度前先确保已从数据库加载。"""
+        """API 查询进度前从数据库刷新，避免多 worker 下读到旧缓存。"""
+        if self.store is None:
+            async with self._lock(learner_id):
+                await self._ensure_loaded(learner_id)
+            return
         async with self._lock(learner_id):
-            await self._ensure_loaded(learner_id)
+            await self._reload_learner(learner_id)
+
+    def _invalidate_learner(self, learner_id: str) -> None:
+        self.learner_models.pop(learner_id, None)
+        self.curriculum.import_reviews(learner_id, {})
+
+    async def _reload_learner(self, learner_id: str) -> None:
+        if self.store is None:
+            return
+        model = await self.store.load_model(learner_id)
+        if model is None:
+            self.learner_models.pop(learner_id, None)
+        else:
+            self.learner_models[learner_id] = model
+        reviews = await self.store.load_reviews(learner_id)
+        self.curriculum.import_reviews(learner_id, reviews)
+
+    async def _flush_deferred_events(self) -> None:
+        if self.store is None or not self._deferred_events:
+            return
+        pending = self._deferred_events
+        self._deferred_events = {}
+        for learner_id, events in pending.items():
+            if learner_id in self._submission_cid:
+                # 该学习者仍有事务在跑，交给它自己的 finally 补写。
+                self._deferred_events.setdefault(learner_id, []).extend(events)
+                continue
+            for event in events:
+                try:
+                    await self.store.append_event(event)
+                except Exception:
+                    logger.exception("persist deferred event failed: %s", event.id)
 
     async def submit_answer(
             self,
@@ -142,17 +195,31 @@ class AgentOrchestrator:
         answer: str,
         time_spent: float = 0.0,
         correlation_id: str | None = None,
-    ) -> tuple[list[Event], Attempt]:
-        """可信答题入口：从题库取题，服务端判分，再走事件链。"""
+        idempotency_key: str | None = None,
+    ) -> tuple[list[Event], Attempt, bool]:
+        """可信答题入口：从题库取题，服务端判分，再走事件链。
+
+        整条链路（attempt + mastery + review + events）在存储层的一个事务里提交，
+        并且用 learner 级锁串行化同一学生的并发提交。重复幂等键不会再次计算。
+        """
         if self.store is None:
             raise RuntimeError("question submission requires a store")
 
-        async with self._lock(learner_id):
-            await self._ensure_loaded(learner_id)
-            question = await self.store.get_question(question_id)
-            if question is None:
-                raise QuestionNotFoundError(question_id)
+        question = await self.store.get_question(question_id)
+        if question is None:
+            raise QuestionNotFoundError(question_id)
 
+        fingerprint = hashlib.sha256(
+            f"{question.id}\0{answer.strip()}".encode("utf-8")
+        ).hexdigest()
+        cid = correlation_id or f"c-{uuid.uuid4().hex[:8]}"
+
+        async def build(
+            model: LearnerModel, reviews: dict[str, ReviewItem]
+        ) -> tuple[Attempt, list[Event]]:
+            # 模型和复习状态由存储事务加载；事件先缓冲，提交时统一写库。
+            self.learner_models[learner_id] = model
+            self.curriculum.import_reviews(learner_id, reviews)
             is_correct = grade_answer(question, answer)
             attempt = Attempt(
                 learner_id=learner_id,
@@ -160,28 +227,63 @@ class AgentOrchestrator:
                 knowledge_id=question.knowledge_id,
                 answer=answer,
                 is_correct=is_correct,
-                time_spent_seconds=max(0.0, float(time_spent)),
+                time_spent_seconds=max(0.0, min(float(time_spent), 3600.0)),
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
             )
-            await self.store.save_attempt(attempt)
-
-            cid = correlation_id or f"c-{uuid.uuid4().hex[:8]}"
-            await self.event_bus.publish(
-                Event(
-                    type=EventType.STUDENT_SUBMISSION,
-                    source="api",
-                    learner_id=learner_id,
-                    data={
-                        "knowledge_id": question.knowledge_id,
-                        "is_correct": is_correct,
-                        "time_spent_seconds": attempt.time_spent_seconds,
-                        "question_id": question.id,
-                    },
-                    correlation_id=cid,
+            self.event_bus.begin_strict(cid)
+            try:
+                await self.event_bus.publish(
+                    Event(
+                        type=EventType.STUDENT_SUBMISSION,
+                        source="api",
+                        learner_id=learner_id,
+                        data={
+                            "knowledge_id": question.knowledge_id,
+                            "is_correct": is_correct,
+                            "time_spent_seconds": attempt.time_spent_seconds,
+                            "question_id": question.id,
+                            "idempotency_key": idempotency_key,
+                        },
+                        correlation_id=cid,
+                    ),
+                    raise_errors=True,
                 )
-            )
-            await self._save(learner_id)
-            events = self.event_bus.get_history(correlation_id=cid, limit=200)
-            return events, attempt
+                events = self.event_bus.get_history(
+                    correlation_id=cid, limit=200
+                )
+            finally:
+                self.event_bus.end_strict(cid)
+            return attempt, events
+
+        self._submission_cid[learner_id] = cid
+        try:
+            try:
+                async with self._lock(learner_id):
+                    attempt, events, replayed = await self.store.submit_transaction(
+                        learner_id,
+                        idempotency_key,
+                        fingerprint,
+                        build,
+                    )
+            except BaseException:
+                # 事务已回滚；清掉可能被 Agent 改过的内存态，下次从库里重载。
+                self._invalidate_learner(learner_id)
+                raise
+            finally:
+                self._submission_cid.pop(learner_id, None)
+        finally:
+            # 必须在 adapter 锁释放后再补写，避免其他学习者的事件死锁。
+            await self._flush_deferred_events()
+
+        if replayed:
+            # 同一 key 可能由另一个 worker 写入；本进程缓存需要刷新。
+            try:
+                async with self._lock(learner_id):
+                    await self._reload_learner(learner_id)
+            except Exception:
+                self._invalidate_learner(learner_id)
+        return events, attempt, replayed
 
     async def get_questions(
         self,

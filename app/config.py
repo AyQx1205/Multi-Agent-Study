@@ -47,6 +47,13 @@ class Settings:
     sqlite_path: str = "knowledge.db"
     db_pool_min: int = 1
     db_pool_max: int = 10
+    # 生产环境设为 false：只允许 Alembic 改表；开发/测试保留自动建表方便启动
+    auto_apply_schema: bool = True
+
+    # 认证：登录会话有效期；生产环境建议放入 HttpOnly Cookie 或接 OIDC
+    session_ttl_hours: int = 24
+    # 平台运维令牌：用于创建新学校（多租户开通），未配置时该接口关闭
+    platform_admin_token: str = ""
 
     # 教学策略
     mastery_threshold: float = 0.6
@@ -72,6 +79,9 @@ class Settings:
             sqlite_path=os.getenv("SQLITE_PATH", "knowledge.db"),
             db_pool_min=_env_int("DB_POOL_MIN", 1),
             db_pool_max=_env_int("DB_POOL_MAX", 10),
+            auto_apply_schema=_env_bool("AUTO_APPLY_SCHEMA", True),
+            session_ttl_hours=_env_int("SESSION_TTL_HOURS", 24),
+            platform_admin_token=os.getenv("PLATFORM_ADMIN_TOKEN", "").strip(),
             mastery_threshold=_env_float("MASTERY_THRESHOLD", 0.6),
             weakness_threshold=_env_float("WEAKNESS_THRESHOLD", 0.3),
             hint_after_attempts=_env_int("HINT_AFTER_ATTEMPTS", 2),
