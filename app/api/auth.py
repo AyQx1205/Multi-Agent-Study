@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
@@ -22,14 +23,17 @@ from app.api.deps import (
 from app.audit import client_ip, record_audit
 from app.config import get_settings
 from app.core.accounts import Principal, Role, User
+from app.core.errors import BootstrapAlreadyCompletedError
 from app.security import (
     hash_password,
     hash_session_token,
     new_session_token,
     verify_password,
 )
+from app.ws_manager import manager
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 _EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
@@ -102,21 +106,22 @@ def _session_payload(user: User, token: str, expires_at: datetime) -> dict[str, 
 @router.post("/bootstrap", status_code=status.HTTP_201_CREATED)
 async def bootstrap(req: BootstrapRequest, request: Request) -> dict[str, Any]:
     store = request.app.state.orchestrator.store
-    if await store.count_users() > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="bootstrap already completed",
-        )
-
+    # 检查「系统还没有用户」和写入必须原子：分两步的话，两个并发请求会各自
+    # 建出一套组织 + 管理员（之前在 count_users() 与 create_* 之间就有这个窗口）。
     try:
-        org = await store.create_organization(req.org_name, req.org_slug)
-        admin = await store.create_user(
-            org.id,
+        org, admin = await store.create_organization_with_admin(
+            req.org_name,
+            req.org_slug,
             req.admin_email,
             hash_password(req.password),
             req.display_name,
-            Role.ADMIN,
+            require_no_users=True,
         )
+    except BootstrapAlreadyCompletedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="bootstrap already completed",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -148,13 +153,13 @@ async def create_organization(
 
     store = request.app.state.orchestrator.store
     try:
-        org = await store.create_organization(req.org_name, req.org_slug)
-        admin = await store.create_user(
-            org.id,
+        # 同样走单事务：组织与管理员要么都建好，要么都不建，避免留下孤儿组织。
+        org, admin = await store.create_organization_with_admin(
+            req.org_name,
+            req.org_slug,
             req.admin_email,
             hash_password(req.password),
             req.display_name,
-            Role.ADMIN,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -180,23 +185,25 @@ async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     email = req.email.lower().strip()
     ip = client_ip(request) or "unknown"
-    # 只锁定“账号 + 来源 IP”组合，避免攻击者用少量失败请求锁死全公司账号。
+    # 只锁定「账号 + 来源 IP」组合，避免攻击者用少量失败请求锁死全公司账号。
     throttle_key = f"login:{req.org_slug.lower()}:{email}:{ip}"
     ip_key = f"login-ip:{ip}"
 
+    org = await store.get_organization_by_slug(req.org_slug)
+    org_id = org.id if org is not None else None
+
+    # 前置锁定只看「账号 + IP」。来源 IP 的总量阈值不参与前置判断：
+    # 学校/公司共用出口 IP 时，别人的失败不应该把正常用户挡在门外
+    # （否则一个 NAT 后面的人互相锁死）。IP 阈值只在失败路径上生效。
     pair_locked = await store.login_locked_until(throttle_key, now)
-    ip_locked = await store.login_locked_until(ip_key, now)
-    locked_until = max(
-        (value for value in (pair_locked, ip_locked) if value is not None),
-        default=None,
-    )
-    if locked_until is not None:
-        retry_after = max(1, int((locked_until - now).total_seconds()))
+    if pair_locked is not None:
+        retry_after = max(1, int((pair_locked - now).total_seconds()))
         await record_audit(
             store,
             "login.blocked",
+            org_id=org_id,
             request=request,
-            metadata={"reason": "rate_limited"},
+            metadata={"reason": "account_locked", "retry_after": retry_after},
         )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -204,7 +211,30 @@ async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
             headers={"Retry-After": str(retry_after)},
         )
 
-    async def failure(reason: str, org_id: str | None, user_id: str | None = None) -> None:
+    async def reject(
+        reason: str, status_code: int, detail: str, user_id: str | None = None
+    ) -> NoReturn:
+        # 来源 IP 的总量阈值只在**会失败**的请求上生效：有效的账号密码
+        # 永远放行，所以学校 NAT 后面不会被别人的失败连带锁死。
+        ip_locked = await store.login_locked_until(ip_key, now)
+        if ip_locked is not None:
+            retry_after = max(1, int((ip_locked - now).total_seconds()))
+            # 审计必须带 org_id，否则管理员在 /auth/audit 里看不到「有人被锁」。
+            await record_audit(
+                store,
+                "login.blocked",
+                org_id=org_id,
+                actor_user_id=user_id,
+                request=request,
+                metadata={"reason": "ip_locked", "trigger": reason},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many failed login attempts",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        # 两条线并行累积：账号+IP（针对账号爆破）与来源 IP 总量（针对撞库）。
         await store.record_login_failure(
             throttle_key,
             now,
@@ -212,7 +242,6 @@ async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
             max_failures=settings.login_max_failures,
             lock_seconds=settings.login_lock_seconds,
         )
-        # 额外的来源 IP 总量阈值，防止同一来源轮换账号做撞库。
         await store.record_login_failure(
             ip_key,
             now,
@@ -228,24 +257,22 @@ async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
             request=request,
             metadata={"reason": reason},
         )
+        raise HTTPException(status_code=status_code, detail=detail)
 
-    org = await store.get_organization_by_slug(req.org_slug)
     if org is None:
-        await failure("unknown_organization", None)
-        raise HTTPException(status_code=401, detail="invalid credentials")
+        await reject("unknown_organization", 401, "invalid credentials")
 
     credentials = await store.get_user_credentials(org.id, email)
     if credentials is None:
-        await failure("unknown_user", org.id)
-        raise HTTPException(status_code=401, detail="invalid credentials")
+        await reject("unknown_user", 401, "invalid credentials")
     user, password_hash = credentials
     if not verify_password(req.password, password_hash):
-        await failure("bad_password", org.id, user.id)
-        raise HTTPException(status_code=401, detail="invalid credentials")
+        await reject("bad_password", 401, "invalid credentials", user.id)
     if not user.is_active:
-        await failure("disabled", org.id, user.id)
-        raise HTTPException(status_code=403, detail="user disabled")
+        await reject("disabled", 403, "user disabled", user.id)
 
+    # 成功只清「账号+IP」计数。来源 IP 的总量计数保留：否则攻击者只要有
+    # 一个自己的账号，就能反复登录把自己的撞库尝试清零。
     await store.reset_login_failures(throttle_key)
     token, expires_at = await _issue_session(request, user)
     await record_audit(
@@ -299,6 +326,11 @@ async def logout(
         user = await store.get_user_by_id(session.user_id) if session else None
         await store.revoke_session(token_hash)
         if user is not None:
+            # 撤销会话之后，已经建立的 WebSocket 并不会自己失效：
+            # 必须主动踢掉，否则等于留了一条永久有效的旁路。
+            closed = await manager.close_learner(user.id, reason="logged out")
+            if closed:
+                logger.info("closed %d websocket(s) for %s on logout", closed, user.id)
             await record_audit(
                 store,
                 "logout",
@@ -307,6 +339,7 @@ async def logout(
                 request=request,
                 target_type="user",
                 target_id=user.id,
+                metadata={"websockets_closed": closed},
             )
     return {"status": "logged_out"}
 

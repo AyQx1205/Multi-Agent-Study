@@ -11,38 +11,14 @@ from app.config import get_settings
 from app.core.accounts import Role, User
 from app.orchestrator import IdempotencyConflictError, QuestionNotFoundError
 from app.security import hash_session_token
+from app.ws_manager import manager
 
 logger = logging.getLogger(__name__)
 ws_router = APIRouter()
 
-
-class ConnectionManager:
-    """一个学生可以有多端连接，所以用 set。"""
-
-    def __init__(self) -> None:
-        self.active: dict[str, set[WebSocket]] = {}
-
-    async def connect(self, learner_id: str, ws: WebSocket) -> None:
-        await ws.accept()
-        self.active.setdefault(learner_id, set()).add(ws)
-
-    def disconnect(self, learner_id: str, ws: WebSocket) -> None:
-        sockets = self.active.get(learner_id)
-        if sockets:
-            sockets.discard(ws)
-            if not sockets:
-                self.active.pop(learner_id, None)
-
-    async def send(self, learner_id: str, payload: dict[str, Any]) -> None:
-        for ws in list(self.active.get(learner_id, set())):
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                logger.warning("ws send failed, dropping one connection", exc_info=True)
-                self.disconnect(learner_id, ws)
-
-
-manager = ConnectionManager()
+MAX_ID_CHARS = 80
+MAX_TEXT_CHARS = 500
+MAX_IDEMPOTENCY_CHARS = 128
 
 
 async def _authorize_student(
@@ -57,8 +33,11 @@ async def _authorize_student(
     return True
 
 
-async def _authenticate(websocket: WebSocket, learner_id: str) -> bool:
-    """优先用一次性 ?ticket=...；旧 ?token= 仅在显式开启时兼容。"""
+async def _authenticate(websocket: WebSocket, learner_id: str) -> User | None:
+    """优先用一次性 ?ticket=...；旧 ?token= 仅在显式开启时兼容。
+
+    返回认证到的用户；失败时已经关闭连接并返回 None。
+    """
     store = websocket.app.state.orchestrator.store
     now = datetime.now(timezone.utc)
     ticket = websocket.query_params.get("ticket", "")
@@ -66,44 +45,67 @@ async def _authenticate(websocket: WebSocket, learner_id: str) -> bool:
         user_id = await store.consume_ws_ticket(hash_session_token(ticket), now)
         if user_id is None:
             await websocket.close(code=1008, reason="invalid or expired ticket")
-            return False
-        return await _authorize_student(
-            websocket, await store.get_user_by_id(user_id), learner_id
-        )
+            return None
+        user = await store.get_user_by_id(user_id)
+        return user if await _authorize_student(websocket, user, learner_id) else None
 
     if not get_settings().ws_allow_query_token:
         await websocket.close(code=1008, reason="missing ticket")
-        return False
+        return None
 
     # 兼容旧客户端：仅在 WS_ALLOW_QUERY_TOKEN=true 时接受长期 token。
     token = websocket.query_params.get("token", "")
     if not token:
         await websocket.close(code=1008, reason="missing ticket")
-        return False
+        return None
     session = await store.get_session(hash_session_token(token))
     if session is None or session.revoked_at is not None:
         await websocket.close(code=1008, reason="invalid token")
-        return False
+        return None
     expires_at = session.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= now:
         await websocket.close(code=1008, reason="token expired")
-        return False
-    return await _authorize_student(
-        websocket, await store.get_user_by_id(session.user_id), learner_id
-    )
+        return None
+    user = await store.get_user_by_id(session.user_id)
+    return user if await _authorize_student(websocket, user, learner_id) else None
+
+
+def _check_rate(websocket: WebSocket, user_id: str, bucket: str, limit: int) -> bool:
+    limiter = getattr(websocket.app.state, "rate_limiter", None)
+    if limiter is None:
+        return True
+    return limiter.hit(f"{bucket}:{user_id}", limit) is None
 
 
 @ws_router.websocket("/ws/{learner_id}")
 async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
-    if not await _authenticate(websocket, learner_id):
+    user = await _authenticate(websocket, learner_id)
+    if user is None:
         return
 
     await manager.connect(learner_id, websocket)
+    settings = get_settings()
+    max_frame = max(512, settings.ws_max_message_chars)
+    store = websocket.app.state.orchestrator.store
     try:
         while True:
             raw = await websocket.receive_text()
+            if len(raw) > max_frame:
+                await manager.send(
+                    learner_id,
+                    {"error": "message_too_large", "limit": max_frame},
+                )
+                continue
+
+            # 每条消息前复查会话：登出、被禁用、会话过期之后，
+            # 已经建立的连接不能继续提交（否则等于一个永久有效的旁路）。
+            if not await store.has_active_session(user.id, datetime.now(timezone.utc)):
+                await manager.send(learner_id, {"error": "session_expired"})
+                await websocket.close(code=1008, reason="session expired")
+                break
+
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -124,11 +126,25 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                         learner_id, {"error": "question_id and answer required"}
                     )
                     continue
-                if not idempotency_key or len(idempotency_key) > 128:
+                if len(question_id) > MAX_ID_CHARS or len(answer) > MAX_TEXT_CHARS:
+                    await manager.send(
+                        learner_id,
+                        {
+                            "error": "field too long",
+                            "limits": {"question_id": MAX_ID_CHARS, "answer": MAX_TEXT_CHARS},
+                        },
+                    )
+                    continue
+                if not idempotency_key or len(idempotency_key) > MAX_IDEMPOTENCY_CHARS:
                     await manager.send(
                         learner_id,
                         {"error": "idempotency_key required (max 128 chars)"},
                     )
+                    continue
+                if not _check_rate(
+                    websocket, user.id, "ws-submit", settings.submit_rate_per_minute
+                ):
+                    await manager.send(learner_id, {"error": "rate_limited"})
                     continue
                 try:
                     time_spent = float(data.get("time_spent_seconds", 0) or 0)
@@ -157,7 +173,11 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                 events = outcome.events
                 attempt = outcome.attempt
                 # 与 HTTP /submit 保持一致：未到揭示阈值时不返回标准答案。
-                revealed = await orch.get_question(attempt.question_id) if outcome.reveal_answer else None
+                revealed = (
+                    await orch.get_question(attempt.question_id)
+                    if outcome.reveal_answer
+                    else None
+                )
                 await manager.send(
                     learner_id,
                     {
@@ -181,15 +201,42 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                         learner_id, {"error": "knowledge_id and question required"}
                     )
                     continue
+                if len(knowledge_id) > MAX_ID_CHARS or len(question) > MAX_TEXT_CHARS:
+                    await manager.send(
+                        learner_id,
+                        {
+                            "error": "field too long",
+                            "limits": {"knowledge_id": MAX_ID_CHARS, "question": MAX_TEXT_CHARS},
+                        },
+                    )
+                    continue
+                if not _check_rate(
+                    websocket, user.id, "ws-question", settings.message_rate_per_minute
+                ):
+                    await manager.send(learner_id, {"error": "rate_limited"})
+                    continue
                 events = await orch.ask_question(learner_id, knowledge_id, question)
             elif action == "message":
                 message = str(data.get("message") or "")
+                knowledge_id = str(data.get("knowledge_id") or "general")
                 if not message:
                     await manager.send(learner_id, {"error": "message required"})
                     continue
-                events = await orch.send_message(
-                    learner_id, message, str(data.get("knowledge_id") or "general")
-                )
+                if len(message) > MAX_TEXT_CHARS or len(knowledge_id) > MAX_ID_CHARS:
+                    await manager.send(
+                        learner_id,
+                        {
+                            "error": "field too long",
+                            "limits": {"message": MAX_TEXT_CHARS, "knowledge_id": MAX_ID_CHARS},
+                        },
+                    )
+                    continue
+                if not _check_rate(
+                    websocket, user.id, "ws-message", settings.message_rate_per_minute
+                ):
+                    await manager.send(learner_id, {"error": "rate_limited"})
+                    continue
+                events = await orch.send_message(learner_id, message, knowledge_id)
             elif action == "ping":
                 await manager.send(learner_id, {"event_type": "pong"})
                 continue

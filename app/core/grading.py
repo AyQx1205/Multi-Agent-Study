@@ -28,6 +28,15 @@ def _clean(text: str) -> str:
     return value
 
 
+def normalize_answer(text: str) -> str:
+    """判分用的归一化形式，同时作为幂等指纹的一部分。
+
+    指纹和判分必须用同一套归一化，否则「x = 4」和「x=4」判分相同、
+    指纹却不同，客户端重试会拿到 409 而不是幂等重放。
+    """
+    return _clean(text)
+
+
 def _as_number(text: str) -> float | None:
     """把 3/4、0.75、75%、x=2 转成数值；失败返回 None。"""
     value = _clean(text).replace(",", "")

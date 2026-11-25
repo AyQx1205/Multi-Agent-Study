@@ -13,7 +13,7 @@ from app.config import Settings, get_settings
 from app.core.content import Attempt, Question
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType,EventBus
-from app.core.grading import grade_answer
+from app.core.grading import grade_answer, normalize_answer
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.learner_model import LearnerModel
 from app.core.spaced_repetition import ReviewItem
@@ -199,8 +199,10 @@ class AgentOrchestrator:
         prior_attempts = 0
         reveal_after = max(1, self.settings.answer_reveal_after_attempts)
 
+        # 指纹必须用和判分同一套归一化：否则「x = 4」和「x=4」判分相同、
+        # 指纹不同，客户端重试会拿到 409 而不是幂等重放。
         fingerprint = hashlib.sha256(
-            f"{question.id}\0{answer.strip()}".encode("utf-8")
+            f"{question.id}\0{normalize_answer(answer)}".encode("utf-8")
         ).hexdigest()
         cid = correlation_id or f"c-{uuid.uuid4().hex[:8]}"
 
@@ -236,6 +238,8 @@ class AgentOrchestrator:
                             "idempotency_key": idempotency_key,
                             "attempts_for_question": attempts_for_question,
                             "counts_toward_mastery": counts_toward_mastery,
+                            # 告诉 Tutor：这条链路在数据库事务里，禁止发起 LLM 调用。
+                            "in_submission": True,
                         },
                         correlation_id=cid,
                     ),
@@ -288,6 +292,12 @@ class AgentOrchestrator:
             except Exception:
                 self._invalidate_learner(learner_id)
 
+        if self.settings.tutor_llm_for_answers and not replayed:
+            # LLM 讲解放到事务提交之后、锁之外：进事务会把数据库锁的持有时间
+            # 从毫秒拉到秒级，直接把并发写能力打没。
+            await self._enrich_teaching_response(learner_id, question.knowledge_id, cid)
+            events = self.event_bus.get_history(correlation_id=cid, limit=200)
+
         return SubmissionOutcome(
             events=events,
             attempt=attempt,
@@ -298,6 +308,30 @@ class AgentOrchestrator:
             reveal_answer=attempt.is_correct
             or attempts_for_question >= reveal_after,
         )
+
+    async def _enrich_teaching_response(
+        self, learner_id: str, knowledge_id: str, correlation_id: str
+    ) -> None:
+        """答题事务提交后，在锁外补一条 LLM 讲解（仅当 TUTOR_LLM_FOR_ANSWERS=true）。
+
+        失败要吞掉：讲解是锦上添花，不能因为模型超时把已经成功的提交变成 500。
+        """
+        model = self.learner_models.get(learner_id)
+        if model is None:
+            return
+        state = model.peek_state(knowledge_id)
+        mastery = state.mastery if state is not None else model.bkt.p_init
+        level = state.level.value if state is not None else "not_started"
+        try:
+            await self.tutor.enrich_answer(
+                learner_id=learner_id,
+                knowledge_id=knowledge_id,
+                level=level,
+                mastery=mastery,
+                correlation_id=correlation_id,
+            )
+        except Exception:
+            logger.exception("post-submit teaching enrichment failed")
 
     async def get_questions(
         self,
@@ -320,40 +354,42 @@ class AgentOrchestrator:
         return await self.store.list_attempts(learner_id, limit)
 
     async def ask_question(self,learner_id: str,knowledge_id: str,question: str) -> list[Event]:
+        # 只在加载模型时持锁。Tutor 处理提问会调 LLM（8~20 秒），
+        # 持锁调用会把同一学生的 /submit 一起堵住。
         async with self._lock(learner_id):
             await self._ensure_loaded(learner_id)
-            cid = f"c-{uuid.uuid4().hex[:8]}"
-            await self.event_bus.publish(
-                Event(
-                    type=EventType.STUDENT_QUESTION,
-                    source="api",
-                    learner_id=learner_id,
-                    data={
-                        "knowledge_id": knowledge_id,
-                        "question": question
-                    },
-                    correlation_id=cid
-                )
+        cid = f"c-{uuid.uuid4().hex[:8]}"
+        await self.event_bus.publish(
+            Event(
+                type=EventType.STUDENT_QUESTION,
+                source="api",
+                learner_id=learner_id,
+                data={
+                    "knowledge_id": knowledge_id,
+                    "question": question
+                },
+                correlation_id=cid
             )
-            return self.event_bus.get_history(correlation_id=cid,limit=200)
+        )
+        return self.event_bus.get_history(correlation_id=cid,limit=200)
 
     async def send_message(self,learner_id: str,message: str,knowledge_id: str = "general") -> list[Event]:
         async with self._lock(learner_id):
             await self._ensure_loaded(learner_id)
-            cid = f"c-{uuid.uuid4().hex[:8]}"
-            await self.event_bus.publish(
-                Event(
-                    type=EventType.STUDENT_MESSAGE,
-                    source="api",
-                    learner_id=learner_id,
-                    data={
-                        "message": message,
-                        "knowledge_id": knowledge_id
-                    },
-                    correlation_id=cid
-                )
+        cid = f"c-{uuid.uuid4().hex[:8]}"
+        await self.event_bus.publish(
+            Event(
+                type=EventType.STUDENT_MESSAGE,
+                source="api",
+                learner_id=learner_id,
+                data={
+                    "message": message,
+                    "knowledge_id": knowledge_id
+                },
+                correlation_id=cid
             )
-            return self.event_bus.get_history(correlation_id=cid,limit=200)
+        )
+        return self.event_bus.get_history(correlation_id=cid,limit=200)
 
     def get_learner_progress(self,learner_id: str) -> dict[str,Any]:
         model = self.learner_models.get(learner_id)

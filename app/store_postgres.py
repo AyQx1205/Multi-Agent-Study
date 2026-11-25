@@ -21,7 +21,7 @@ from typing import Any
 
 from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
 from app.core.content import Attempt, Question, QuestionType
-from app.core.errors import IdempotencyConflictError
+from app.core.errors import BootstrapAlreadyCompletedError, IdempotencyConflictError
 from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
 from app.core.spaced_repetition import ReviewItem
@@ -206,6 +206,10 @@ def advisory_key(learner_id: str) -> int:
     """稳定的 64-bit signed key，供 PostgreSQL advisory lock 使用。"""
     digest = hashlib.sha256(learner_id.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
+
+
+# `/auth/bootstrap` 的全局锁：同一时刻只允许一个「系统首个管理员」事务。
+BOOTSTRAP_LOCK_KEY = 20261029
 
 
 class PostgresStore:
@@ -667,6 +671,70 @@ class PostgresStore:
             raise
         return user
 
+    async def create_organization_with_admin(
+        self,
+        name: str,
+        slug: str,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        *,
+        require_no_users: bool = False,
+    ) -> tuple[Organization, User]:
+        """单事务创建组织 + 首个管理员；`require_no_users` 用 advisory lock 防并发。"""
+        org = Organization(
+            id=str(uuid.uuid4()), name=name, slug=slug, created_at=datetime.now(timezone.utc)
+        )
+        user = User(
+            id=str(uuid.uuid4()),
+            org_id=org.id,
+            email=email.lower().strip(),
+            display_name=display_name,
+            role=Role.ADMIN,
+            created_at=datetime.now(timezone.utc),
+        )
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    if require_no_users:
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock($1)", BOOTSTRAP_LOCK_KEY
+                        )
+                        if await conn.fetchval("SELECT COUNT(*) FROM users"):
+                            raise BootstrapAlreadyCompletedError(
+                                "bootstrap already completed"
+                            )
+                    await conn.execute(
+                        "INSERT INTO organizations(id, name, slug, created_at) VALUES($1,$2,$3,$4)",
+                        org.id,
+                        org.name,
+                        org.slug,
+                        org.created_at,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO users
+                            (id, org_id, email, password_hash, display_name, role,
+                             is_active, created_at)
+                        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                        """,
+                        user.id,
+                        user.org_id,
+                        user.email,
+                        password_hash,
+                        user.display_name,
+                        user.role.value,
+                        user.is_active,
+                        user.created_at,
+                    )
+        except Exception as exc:
+            if isinstance(exc, BootstrapAlreadyCompletedError):
+                raise
+            if asyncpg is not None and isinstance(exc, asyncpg.UniqueViolationError):
+                raise ValueError("organization or admin already exists") from exc
+            raise
+        return org, user
+
     async def get_user_by_id(self, user_id: str) -> User | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
@@ -863,6 +931,22 @@ class PostgresStore:
                 datetime.now(timezone.utc),
                 token_hash,
             )
+
+    async def has_active_session(self, user_id: str, now: datetime) -> bool:
+        """该用户是否还有未撤销、未过期、且账号仍启用的会话。"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchval(
+                """
+                SELECT 1 FROM auth_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.user_id=$1 AND s.revoked_at IS NULL
+                  AND u.is_active AND s.expires_at > $2
+                LIMIT 1
+                """,
+                user_id,
+                _utc(now),
+            )
+        return bool(row)
 
     # ── WebSocket 一次性 ticket ──
     async def create_ws_ticket(

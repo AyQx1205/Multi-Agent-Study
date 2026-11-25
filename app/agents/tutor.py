@@ -97,7 +97,10 @@ class TutorAgent(BaseAgent):
 
         # 真实 LLM 默认只用于“学生主动提问/聊天”，答题反馈走模板：
         # 成本低、/submit 不需要等模型；需要时把 TUTOR_LLM_FOR_ANSWERS 设为 true。
-        if is_correct is not None and not self._llm_for_answers:
+        # 注意：答题链路在数据库事务里，此时**绝不**发起 LLM 调用（in_submission），
+        # LLM 讲解由 orchestrator 在事务提交后补发。
+        in_submission = bool(event.data.get("in_submission", False))
+        if is_correct is not None and (not self._llm_for_answers or in_submission):
             response = self._template_response(
                 knowledge_id, level, mastery, is_correct, event.data.get("question", "")
             )
@@ -158,6 +161,36 @@ class TutorAgent(BaseAgent):
                 "hint_level": event.data.get("hint_level", 1),
             },
             correlation_id=event.correlation_id,
+        )
+
+    async def enrich_answer(
+        self,
+        *,
+        learner_id: str,
+        knowledge_id: str,
+        level: str,
+        mastery: float,
+        correlation_id: str | None = None,
+    ) -> None:
+        """事务提交后补一条 LLM 讲解（TUTOR_LLM_FOR_ANSWERS=true 时）。"""
+        response = await self._generate(
+            knowledge_id=knowledge_id,
+            level=level,
+            mastery=mastery,
+            is_correct=None,
+            question="",
+        )
+        await self.emit(
+            EventType.TEACHING_RESPONSE,
+            learner_id,
+            {
+                "knowledge_id": knowledge_id,
+                "response": response,
+                "teaching_style": "socratic",
+                "difficulty_level": level,
+                "enriched": True,
+            },
+            correlation_id=correlation_id,
         )
 
     async def _handle_engagement_alert(self, event: Event) -> None:

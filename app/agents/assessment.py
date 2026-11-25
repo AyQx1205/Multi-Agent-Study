@@ -98,6 +98,8 @@ class AssessmentAgent(BaseAgent):
                 "mastery": round(state.mastery, 4),
                 "level": state.level.value,
                 "overall_progress": model.get_overall_progress(),
+                # 透传「这条链路在数据库事务里」，Tutor 据此禁止发起 LLM 调用。
+                "in_submission": bool(event.data.get("in_submission", False)),
             },
             correlation_id=cid,
         )

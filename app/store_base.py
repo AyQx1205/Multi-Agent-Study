@@ -97,6 +97,17 @@ class Store(Protocol):
         self, org_id: str, email: str, password_hash: str, display_name: str, role: Role
     ) -> User: ...
 
+    async def create_organization_with_admin(
+        self,
+        name: str,
+        slug: str,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        *,
+        require_no_users: bool = False,
+    ) -> tuple[Organization, User]: ...
+
     async def get_user_by_id(self, user_id: str) -> User | None: ...
 
     async def get_user_by_email(self, org_id: str, email: str) -> User | None: ...
@@ -132,6 +143,8 @@ class Store(Protocol):
     async def get_session(self, token_hash: str) -> SessionRecord | None: ...
 
     async def revoke_session(self, token_hash: str) -> None: ...
+
+    async def has_active_session(self, user_id: str, now: Any) -> bool: ...
 
     async def create_ws_ticket(
         self,
@@ -329,6 +342,26 @@ class SqliteStoreAdapter:
     async def get_user_by_id(self, user_id: str) -> User | None:
         return await self._call(self._inner.get_user_by_id, user_id)
 
+    async def create_organization_with_admin(
+        self,
+        name: str,
+        slug: str,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        *,
+        require_no_users: bool = False,
+    ) -> tuple[Organization, User]:
+        return await self._call(
+            self._inner.create_organization_with_admin,
+            name,
+            slug,
+            email,
+            password_hash,
+            display_name,
+            require_no_users=require_no_users,
+        )
+
     async def get_user_by_email(self, org_id: str, email: str) -> User | None:
         return await self._call(self._inner.get_user_by_email, org_id, email)
 
@@ -382,6 +415,9 @@ class SqliteStoreAdapter:
 
     async def revoke_session(self, token_hash: str) -> None:
         await self._call(self._inner.revoke_session, token_hash)
+
+    async def has_active_session(self, user_id: str, now: Any) -> bool:
+        return await self._call(self._inner.has_active_session, user_id, now)
 
     async def create_ws_ticket(
         self,

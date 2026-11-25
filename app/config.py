@@ -78,6 +78,12 @@ class Settings:
     ws_ticket_ttl_seconds: int = 30
     # 仅用于兼容旧客户端；生产保持 false，WebSocket 必须使用 ticket。
     ws_allow_query_token: bool = False
+    # 单帧最大字符数；防止一个超大 payload 直接进内存/进 prompt。
+    ws_max_message_chars: int = 4096
+
+    # 交互限流（按用户、每分钟）。目前是进程内实现，多实例时需要换成共享存储。
+    submit_rate_per_minute: int = 30
+    message_rate_per_minute: int = 10
 
     # 教学策略
     mastery_threshold: float = 0.6
@@ -125,6 +131,9 @@ class Settings:
             login_lock_seconds=_env_int("LOGIN_LOCK_SECONDS", 900),
             ws_ticket_ttl_seconds=_env_int("WS_TICKET_TTL_SECONDS", 30),
             ws_allow_query_token=_env_bool("WS_ALLOW_QUERY_TOKEN", False),
+            ws_max_message_chars=_env_int("WS_MAX_MESSAGE_CHARS", 4096),
+            submit_rate_per_minute=_env_int("SUBMIT_RATE_PER_MINUTE", 30),
+            message_rate_per_minute=_env_int("MESSAGE_RATE_PER_MINUTE", 10),
             mastery_threshold=_env_float("MASTERY_THRESHOLD", 0.6),
             weakness_threshold=_env_float("WEAKNESS_THRESHOLD", 0.3),
             hint_after_attempts=_env_int("HINT_AFTER_ATTEMPTS", 2),

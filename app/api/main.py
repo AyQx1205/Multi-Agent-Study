@@ -15,6 +15,7 @@ from app.config import Settings, get_settings
 from app.content import build_junior_math_graph, build_junior_math_questions
 from app.llm.client import MockLLM, OpenAICompatibleLLM
 from app.orchestrator import AgentOrchestrator
+from app.rate_limit import SlidingWindowLimiter
 from app.store import SqliteStore
 from app.store_base import SqliteStoreAdapter
 from app.store_postgres import PostgresStore
@@ -24,10 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 def build_llm(settings: Settings) -> Any:
-    if settings.mock_llm or not settings.llm_api_key:
-        if not settings.mock_llm:
-            logger.warning("MOCK_LLM=false but LLM_API_KEY is empty; falling back to MockLLM")
+    """构造 LLM。MOCK_LLM=false 却拿不到 key 时**直接失败**。
+
+    之前这里会打一条 warning 然后退回 MockLLM：生产环境会静默返回罐头话术，
+    日志里除了启动那一行完全看不出来，属于最危险的一类配置错误。
+    """
+    if settings.mock_llm:
         return MockLLM()
+    if not settings.llm_api_key:
+        raise RuntimeError(
+            "MOCK_LLM=false 但 LLM_API_KEY 为空。请配置 LLM_API_KEY / DASHSCOPE_API_KEY，"
+            "或显式设置 MOCK_LLM=true 使用离线 Mock 模型。"
+        )
     return OpenAICompatibleLLM(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
@@ -64,6 +73,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("content ready: %d knowledge nodes, %d questions", len(graph.nodes), seeded)
 
     llm = build_llm(settings)
+    app.state.llm_mode = "mock" if isinstance(llm, MockLLM) else settings.llm_model
+    app.state.rate_limiter = SlidingWindowLimiter()
     app.state.orchestrator = AgentOrchestrator(
         llm=llm,
         settings=settings,

@@ -42,7 +42,25 @@ LOGIN_WINDOW_SECONDS=900
 LOGIN_LOCK_SECONDS=900
 WS_TICKET_TTL_SECONDS=30
 WS_ALLOW_QUERY_TOKEN=false
+WS_MAX_MESSAGE_CHARS=4096
+SUBMIT_RATE_PER_MINUTE=30
+MESSAGE_RATE_PER_MINUTE=10
+# 答错后第几次尝试才揭示答案
+ANSWER_REVEAL_AFTER_ATTEMPTS=2
 ```
+
+LLM 相关（`.env`）：
+
+```dotenv
+MOCK_LLM=false
+LLM_API_KEY=sk-xxx
+LLM_MODEL=deepseek-v4.1-flash
+# 答题链路只在模板里回复；打开后会在事务提交后额外补一条 LLM 讲解
+TUTOR_LLM_FOR_ANSWERS=false
+```
+
+> `MOCK_LLM=false` 但没配 `LLM_API_KEY` 时**启动直接失败**，不再静默退回 Mock：
+> 静默降级在生产里等于“模型没接上，但没人知道”。`GET /health` 会报告当前生效的 `llm` 模式。
 
 首次启动或升级后执行迁移：
 
@@ -67,7 +85,7 @@ alembic current
 
 ### 首次创建管理员
 
-系统没有任何用户时，可以调用一次：
+系统没有任何用户时，可以调用一次（检查与写入在同一个事务里，并发调用只会成功一个，其余返回 `409`）：
 
 ```powershell
 $body = @{
@@ -111,9 +129,23 @@ POST /auth/logout
 
 - 登录失败按“学校 + 邮箱 + 来源 IP”计数：默认 15 分钟内失败 5 次锁定 15 分钟，返回 `429` 和 `Retry-After`；
 - 同一来源 IP 还有 15 分钟内 30 次的跨账号总量阈值，防止撞库；
+- **IP 阈值只作用在会失败的请求上**：账号密码正确的登录永远放行，避免学校/公司共用出口 IP 时被别人的失败连带锁死；
 - 可通过 `LOGIN_MAX_FAILURES`、`LOGIN_IP_MAX_FAILURES`、`LOGIN_WINDOW_SECONDS`、`LOGIN_LOCK_SECONDS` 调整；
-- `GET /auth/audit` 仅管理员可读，记录登录成功/失败/锁定、bootstrap、开学校、建用户/班级、选课、WebSocket ticket 和退出；
+- `GET /auth/audit` 仅管理员可读，记录登录成功/失败/锁定、bootstrap、开学校、建用户/班级、选课、WebSocket ticket 和退出；**被锁事件（`login.blocked`）带 `org_id`**，管理员能看到本组织有人被锁；
 - CORS 只允许 `CORS_ORIGINS` 白名单，默认只放行本地开发端口；启动时发现 `*` 会直接报错拒绝启动。
+
+### 交互限流
+
+`/submit`、`/question`、`/message` 都能触发 LLM 调用，因此按用户限流：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `SUBMIT_RATE_PER_MINUTE` | 30 | 每用户每分钟提交次数 |
+| `MESSAGE_RATE_PER_MINUTE` | 10 | 每用户每分钟提问/消息次数（WS 与 HTTP 共用） |
+| `WS_MAX_MESSAGE_CHARS` | 4096 | WebSocket 单帧最大字符数 |
+
+超限返回 `429` + `Retry-After`；WebSocket 上返回 `{"error":"rate_limited"}`。
+限流器是**进程内**实现，多实例时各算各的（与内存态 LearnerModel 是同一类限制）。
 
 ### 管理员创建老师和学生
 
@@ -228,6 +260,15 @@ ws://127.0.0.1:8000/ws/{learner_id}?ticket={ticket}
 ```
 
 ticket 用过即失效；默认不再支持 `?token=`。只有本地兼容旧客户端时才设置 `WS_ALLOW_QUERY_TOKEN=true`。
+
+连接建立后：
+
+- **每条消息都会复查会话**：登出、账号被禁用、会话过期之后，已建立的连接不能再提交任何东西，服务端返回 `{"error":"session_expired"}` 并关闭；
+- `POST /auth/logout` 会主动关闭该用户所有存活的 WebSocket（审计里记录 `websockets_closed`）；
+- 单帧上限 `WS_MAX_MESSAGE_CHARS`（默认 4096），字段上限：`question_id`/`knowledge_id` 80 字符、`answer`/`question`/`message` 500 字符；
+- 提交/提问/消息都按用户限流，超限返回 `{"error":"rate_limited"}`。
+
+> 已知缺口：会话**自然过期**时，静默挂着的连接不会主动收到关闭帧，要等到它下一次发消息才会被拒。
 
 脚本会自动登录并申请 ticket：
 

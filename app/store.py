@@ -18,11 +18,11 @@ from pathlib import Path
 
 from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
 from app.core.content import Attempt, Question, QuestionType
-from app.core.errors import IdempotencyConflictError
+from app.core.errors import BootstrapAlreadyCompletedError, IdempotencyConflictError
 from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
 from app.core.spaced_repetition import ReviewItem
-from app.core.timeutil import parse_iso_utc, utcnow
+from app.core.timeutil import ensure_utc, parse_iso_utc, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS learners (
@@ -333,6 +333,75 @@ class SqliteStore:
         self.conn.commit()
         return user
 
+    def create_organization_with_admin(
+        self,
+        name: str,
+        slug: str,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        *,
+        require_no_users: bool = False,
+    ) -> tuple[Organization, User]:
+        """在同一个写事务里创建组织 + 首个管理员。
+
+        `require_no_users=True` 用于 `/auth/bootstrap`：先 `COUNT(*)` 再插入，
+        检查和写入必须在同一事务里，否则两个并发请求会各自建出一套组织/管理员。
+        """
+        if self.conn.in_transaction:
+            self.conn.rollback()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if require_no_users:
+                count = self.conn.execute(
+                    "SELECT COUNT(*) AS n FROM users"
+                ).fetchone()["n"]
+                if count > 0:
+                    raise BootstrapAlreadyCompletedError("bootstrap already completed")
+
+            org = Organization(
+                id=str(uuid.uuid4()), name=name, slug=slug, created_at=utcnow()
+            )
+            user = User(
+                id=str(uuid.uuid4()),
+                org_id=org.id,
+                email=email.lower().strip(),
+                display_name=display_name,
+                role=Role.ADMIN,
+                created_at=utcnow(),
+            )
+            self.conn.execute(
+                "INSERT INTO organizations(id, name, slug, created_at) VALUES (?,?,?,?)",
+                (org.id, org.name, org.slug, org.created_at.isoformat()),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO users
+                    (id, org_id, email, password_hash, display_name, role,
+                     is_active, created_at)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    user.id,
+                    user.org_id,
+                    user.email,
+                    password_hash,
+                    user.display_name,
+                    user.role.value,
+                    int(user.is_active),
+                    user.created_at.isoformat(),
+                ),
+            )
+            self.conn.commit()
+            return org, user
+        except sqlite3.IntegrityError as exc:
+            self.conn.rollback()
+            raise ValueError("organization or admin already exists") from exc
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+
     def get_user_by_id(self, user_id: str) -> User | None:
         row = self.conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return self._user_from_row(row) if row else None
@@ -502,6 +571,27 @@ class SqliteStore:
             (utcnow().isoformat(), token_hash),
         )
         self.conn.commit()
+
+    def has_active_session(self, user_id: str, now: datetime) -> bool:
+        """该用户是否还有未撤销、未过期、且账号仍启用的会话。
+
+        WebSocket 每条消息前用它复查：会话被撤销（登出）或过期后，
+        已建立的连接不能再提交任何东西。
+        """
+        rows = self.conn.execute(
+            """
+            SELECT s.expires_at FROM auth_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.user_id=? AND s.revoked_at IS NULL AND u.is_active=1
+            """,
+            (user_id,),
+        ).fetchall()
+        current = ensure_utc(now) or utcnow()
+        for row in rows:
+            expires_at = parse_iso_utc(row["expires_at"])
+            if expires_at is not None and expires_at > current:
+                return True
+        return False
 
     # ── WebSocket 一次性 ticket ──
     def create_ws_ticket(

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from pydantic import BaseModel, Field
 
 from app.api.deps import ensure_learner_access, get_principal, require_roles
+from app.config import get_settings
 from app.content import content_summary
 from app.core.accounts import Principal, Role
 from app.orchestrator import (
@@ -15,6 +16,23 @@ from app.orchestrator import (
 )
 
 router = APIRouter(tags=["education"])
+
+
+def _enforce_rate_limit(request: Request, bucket: str, user_id: str, limit: int) -> None:
+    """按用户限流；超限回 429 + Retry-After。
+
+    限流器挂在 `app.state` 上（每个应用实例一个），多实例时各算各的。
+    """
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if limiter is None:
+        return
+    wait = limiter.hit(f"{bucket}:{user_id}", limit)
+    if wait is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded",
+            headers={"Retry-After": str(int(wait) + 1)},
+        )
 
 
 class SubmitAnswerRequest(BaseModel):
@@ -55,6 +73,7 @@ async def health_check(request: Request) -> dict[str, Any]:
         "service": "multi-agent-lite",
         "agents": len(agents),
         "storage": orch.store.name if orch.store else "memory",
+        "llm": getattr(request.app.state, "llm_mode", "unknown"),
         "content": content_summary(),
     }
 
@@ -125,6 +144,12 @@ async def submit_answer(
     principal: Principal = Depends(require_roles(Role.STUDENT)),
 ) -> dict[str, Any]:
     orch = request.app.state.orchestrator
+    _enforce_rate_limit(
+        request,
+        "submit",
+        principal.user_id,
+        get_settings().submit_rate_per_minute,
+    )
     try:
         outcome = await orch.submit_question(
             principal.user_id,
@@ -170,6 +195,12 @@ async def ask_question(
     principal: Principal = Depends(require_roles(Role.STUDENT)),
 ) -> dict[str, Any]:
     orch = request.app.state.orchestrator
+    _enforce_rate_limit(
+        request,
+        "question",
+        principal.user_id,
+        get_settings().message_rate_per_minute,
+    )
     events = await orch.ask_question(principal.user_id, req.knowledge_id, req.question)
     return {
         "status": "processed",
@@ -186,6 +217,12 @@ async def send_message(
     principal: Principal = Depends(require_roles(Role.STUDENT)),
 ) -> dict[str, Any]:
     orch = request.app.state.orchestrator
+    _enforce_rate_limit(
+        request,
+        "message",
+        principal.user_id,
+        get_settings().message_rate_per_minute,
+    )
     events = await orch.send_message(principal.user_id, req.message, req.knowledge_id)
     return {
         "status": "processed",

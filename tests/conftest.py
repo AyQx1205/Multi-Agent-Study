@@ -6,6 +6,9 @@ import os
 # PostgreSQL 集成测试单独用 TEST_DATABASE_URL（见 tests/test_store_postgres.py）。
 os.environ["DATABASE_URL"] = ""
 os.environ["SQLITE_PATH"] = ":memory:"
+# 测试必须离线且确定性：不读 .env 里的真实 key，也不发真实 LLM 请求。
+os.environ["MOCK_LLM"] = "true"
+os.environ["LLM_API_KEY"] = ""
 
 import uuid
 
