@@ -11,14 +11,13 @@ os.environ["MOCK_LLM"] = "true"
 os.environ["LLM_API_KEY"] = ""
 
 import uuid
-
 from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
-from app.core.events import Event, EventType, EventBus
+from app.core.events import Event, EventBus, EventType
 from app.orchestrator import AgentOrchestrator
 
 

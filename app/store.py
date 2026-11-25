@@ -1,10 +1,11 @@
-"""SQLite 持久化 —— 最小可用的落库 + 乐观锁。
+"""SQLite 持久化 —— 落库、事件记录与提交事务。
 
 对应教程：04-进阶/14-持久化与并发一致性.md
 
 设计要点：
-- 提供 load/save/CAS/append_event 以及 SM-2 复习排期的读写；
-- knowledge_states 带 version，compare_and_swap 用 version 做冲突检测；
+- knowledge_states 的 version 列是**行修订号**（每次写入 +1），用于观测和排查；
+  并发控制不靠它——单进程用 learner 级 asyncio 锁，多实例用 PostgreSQL 的
+  `pg_advisory_xact_lock`，SQLite 开发模式用 `BEGIN IMMEDIATE`；
 - events 是 append-only，主键去重。
 """
 
@@ -927,40 +928,6 @@ class SqliteStore:
                 total_reviews=row["total_reviews"],
             )
         return result
-
-    def get_version(self, learner_id: str, knowledge_id: str) -> int:
-        row = self.conn.execute(
-            "SELECT version FROM knowledge_states WHERE learner_id=? AND knowledge_id=?",
-            (learner_id, knowledge_id),
-        ).fetchone()
-        return int(row["version"]) if row else 0
-
-    def compare_and_swap(
-        self, learner_id: str, state: KnowledgeState, expected_version: int
-    ) -> bool:
-        """版本匹配才写入；返回是否成功。"""
-        cursor = self.conn.execute(
-            """
-            UPDATE knowledge_states
-            SET mastery=?, alpha=?, beta=?, attempts=?, correct_count=?, streak=?,
-                last_attempt=?, version=version+1
-            WHERE learner_id=? AND knowledge_id=? AND version=?
-            """,
-            (
-                state.mastery,
-                state.alpha,
-                state.beta,
-                state.attempts,
-                state.correct_count,
-                state.streak,
-                state.last_attempt.isoformat() if state.last_attempt else None,
-                learner_id,
-                state.knowledge_id,
-                expected_version,
-            ),
-        )
-        self.conn.commit()
-        return cursor.rowcount == 1
 
     # ── 题库与答题记录 ──
     def seed_questions(self, questions: list[Question]) -> int:

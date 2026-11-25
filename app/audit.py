@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Request
@@ -47,7 +47,7 @@ async def record_audit(
         ip=client_ip(request),
         user_agent=user_agent,
         metadata=metadata or {},
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     try:
         await store.append_audit_log(entry)

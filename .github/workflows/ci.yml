@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+      - name: ruff
+        run: ruff check .
+      - name: mypy
+        run: mypy
+
+  test:
+    name: pytest (sqlite + postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: multi_agent
+          POSTGRES_PASSWORD: multi_agent_dev
+          POSTGRES_DB: multi_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install runtime deps
+        run: pip install -r requirements.txt
+      - name: Run tests
+        env:
+          # conftest 会把 DATABASE_URL 清空走内存 SQLite；
+          # 这个变量让 test_store_postgres.py 跑真实 PG。
+          TEST_DATABASE_URL: postgresql://multi_agent:multi_agent_dev@127.0.0.1:5432/multi_agent
+          MOCK_LLM: "true"
+        run: python -m pytest -p no:cacheprovider

@@ -1,0 +1,36 @@
+[project]
+name = "multi-agent-lite"
+version = "0.1.0"
+description = "多智能体自适应练习后端：5 个 Agent、事件驱动 Mesh、FastAPI + SQLite/PostgreSQL"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "migrations/versions", "knowledge.db"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    # 中文注释与字符串里全角标点很常见，不需要因为视觉宽度而换行
+    "E501",
+    # FastAPI 的依赖注入就是「在默认参数里调用 Depends()」，这是框架写法
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # assert False 在测试里是合法的失败手段
+# alembic 的 env.py 是脚手架文件，末尾换行由生成器决定
+"migrations/env.py" = ["W292"]
+
+# 说明：pytest 配置仍在 pytest.ini（优先级高于 pyproject.toml），
+# ruff / mypy 配置放在这里。
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app/core", "app/metrics.py", "app/rate_limit.py", "app/maintenance.py"]
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true

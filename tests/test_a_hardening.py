@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -128,13 +129,13 @@ def test_login_blocked_audit_is_visible_to_admin(admin, monkeypatch) -> None:
 
 
 def test_has_active_session_tracks_revocation(student) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.security import hash_session_token
 
     client = student["client"]
     store = client.app.state.orchestrator.store
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     token_hash = hash_session_token(student["token"])
 
     async def scenario() -> tuple[bool, bool]:

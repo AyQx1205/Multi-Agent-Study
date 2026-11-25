@@ -9,10 +9,8 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-
-import pytest
 
 from app.config import Settings
 from app.content import build_junior_math_graph
@@ -102,7 +100,7 @@ async def test_purge_expired_removes_stale_rows_and_keeps_valid_ones() -> None:
     path = _temp_db()
     adapter = SqliteStoreAdapter(SqliteStore(path))
     try:
-        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         org, user = await adapter.create_organization_with_admin(
             "清理学校", "purge-school", "admin@purge.local", "hash", "管理员"
         )
@@ -154,13 +152,13 @@ def test_purge_history_deletes_only_old_rows() -> None:
             type=EventType.STUDENT_MESSAGE,
             source="t",
             learner_id="s1",
-            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            timestamp=datetime(2025, 1, 1, tzinfo=UTC),
         )
         new = Event(type=EventType.STUDENT_MESSAGE, source="t", learner_id="s1")
         store.append_event(old)
         store.append_event(new)
 
-        counts = store.purge_history(datetime(2025, 6, 1, tzinfo=timezone.utc))
+        counts = store.purge_history(datetime(2025, 6, 1, tzinfo=UTC))
         assert counts["events"] == 1
         remaining = store.get_events("s1")
         assert [event.id for event in remaining] == [new.id]
@@ -240,7 +238,7 @@ async def test_maintenance_run_once_purges_and_reports() -> None:
     path = _temp_db()
     adapter = SqliteStoreAdapter(SqliteStore(path))
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         org, user = await adapter.create_organization_with_admin(
             "维护学校", "maint-school", "maint@x.local", "hash", "管理员"
         )

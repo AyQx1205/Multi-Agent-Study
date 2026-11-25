@@ -45,17 +45,26 @@ def test_load_unknown_returns_none(store_path) -> None:
     store.close()
 
 
-def test_optimistic_lock(store_path) -> None:
+def test_save_model_bumps_revision(store_path) -> None:
+    """version 列是行修订号（只用于观测），不是并发控制手段。
+
+    并发控制靠 learner 级锁 + 数据库事务/advisory lock，见
+    tests/test_submission_concurrency.py。
+    """
     store = SqliteStore(store_path)
     model = LearnerModel("s1")
     model.update_mastery("arithmetic", True)
     store.save_model(model)
 
-    state = model.get_state("arithmetic")
-    assert store.get_version("s1", "arithmetic") == 1
-    assert store.compare_and_swap("s1", state, 1) is True
-    assert store.compare_and_swap("s1", state, 1) is False
-    assert store.get_version("s1", "arithmetic") == 2
+    row = store.conn.execute(
+        "SELECT version FROM knowledge_states WHERE learner_id='s1' AND knowledge_id='arithmetic'"
+    ).fetchone()
+    assert row["version"] == 1
+    store.save_model(model)
+    row = store.conn.execute(
+        "SELECT version FROM knowledge_states WHERE learner_id='s1' AND knowledge_id='arithmetic'"
+    ).fetchone()
+    assert row["version"] == 2
     store.close()
 
 

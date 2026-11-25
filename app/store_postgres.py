@@ -2,7 +2,7 @@
 
 和 `app/store.py` 的 SQLite 版保持同一套语义：
 - learners / knowledge_states / review_items / events 四张表；
-- knowledge_states.version 做乐观锁；
+- knowledge_states.version 是行修订号（只用于观测），并发控制靠 pg_advisory_xact_lock；
 - events 以 id 为主键，重复写入自动忽略（至少一次投递，幂等消费）。
 
 启动时可以通过 `PostgresStore.connect()` 自动建表；生产环境建议把
@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
@@ -235,7 +235,7 @@ class PostgresStore:
         max_size: int = 10,
         *,
         apply_schema: bool = True,
-    ) -> "PostgresStore":
+    ) -> PostgresStore:
         if asyncpg is None:
             raise RuntimeError(
                 "asyncpg is not installed. Run: pip install -r requirements.txt"
@@ -613,7 +613,7 @@ class PostgresStore:
 
     async def create_organization(self, name: str, slug: str) -> Organization:
         org = Organization(
-            id=str(uuid.uuid4()), name=name, slug=slug, created_at=datetime.now(timezone.utc)
+            id=str(uuid.uuid4()), name=name, slug=slug, created_at=datetime.now(UTC)
         )
         try:
             async with self.pool.acquire() as conn:
@@ -654,7 +654,7 @@ class PostgresStore:
             email=email.lower().strip(),
             display_name=display_name,
             role=role,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         try:
             async with self.pool.acquire() as conn:
@@ -692,7 +692,7 @@ class PostgresStore:
     ) -> tuple[Organization, User]:
         """单事务创建组织 + 首个管理员；`require_no_users` 用 advisory lock 防并发。"""
         org = Organization(
-            id=str(uuid.uuid4()), name=name, slug=slug, created_at=datetime.now(timezone.utc)
+            id=str(uuid.uuid4()), name=name, slug=slug, created_at=datetime.now(UTC)
         )
         user = User(
             id=str(uuid.uuid4()),
@@ -700,7 +700,7 @@ class PostgresStore:
             email=email.lower().strip(),
             display_name=display_name,
             role=Role.ADMIN,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         try:
             async with self.pool.acquire() as conn:
@@ -785,7 +785,7 @@ class PostgresStore:
             name=name,
             code=code.strip().upper(),
             teacher_id=teacher_id,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         try:
             async with self.pool.acquire() as conn:
@@ -858,7 +858,7 @@ class PostgresStore:
                 """,
                 class_id,
                 user_id,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
             )
 
     async def list_class_students(self, class_id: str) -> list[User]:
@@ -937,7 +937,7 @@ class PostgresStore:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE auth_sessions SET revoked_at=$1 WHERE token_hash=$2",
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 token_hash,
             )
 
@@ -1073,7 +1073,7 @@ class PostgresStore:
                 if row is not None:
                     previous = row["window_start"]
                     if previous.tzinfo is None:
-                        previous = previous.replace(tzinfo=timezone.utc)
+                        previous = previous.replace(tzinfo=UTC)
                     if previous > now - timedelta(seconds=window_seconds):
                         window_start = previous
                         failures = int(row["failures"]) + 1
@@ -1205,42 +1205,6 @@ class PostgresStore:
                 total_reviews=row["total_reviews"],
             )
         return result
-
-    async def get_version(self, learner_id: str, knowledge_id: str) -> int:
-        async with self.pool.acquire() as conn:
-            value = await conn.fetchval(
-                """
-                SELECT version FROM knowledge_states
-                WHERE learner_id=$1 AND knowledge_id=$2
-                """,
-                learner_id,
-                knowledge_id,
-            )
-        return int(value or 0)
-
-    async def compare_and_swap(
-        self, learner_id: str, state: KnowledgeState, expected_version: int
-    ) -> bool:
-        async with self.pool.acquire() as conn:
-            status = await conn.execute(
-                """
-                UPDATE knowledge_states
-                SET mastery=$1, alpha=$2, beta=$3, attempts=$4, correct_count=$5,
-                    streak=$6, last_attempt=$7, version=version+1
-                WHERE learner_id=$8 AND knowledge_id=$9 AND version=$10
-                """,
-                state.mastery,
-                state.alpha,
-                state.beta,
-                state.attempts,
-                state.correct_count,
-                state.streak,
-                _utc(state.last_attempt),
-                learner_id,
-                state.knowledge_id,
-                expected_version,
-            )
-        return status == "UPDATE 1"
 
     # ── 题库与答题记录 ──
     async def seed_questions(self, questions: list[Question]) -> int:

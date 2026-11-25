@@ -87,5 +87,5 @@ class SpacedRepetition:
                     if (ensure_utc(item.next_review) or current).date() == day
                 ]
             if bucket:
-                schedule[day.isoformat()] = sorted(set(bucket))        
-        return schedule    
+                schedule[day.isoformat()] = sorted(set(bucket))
+        return schedule

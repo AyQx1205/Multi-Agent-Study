@@ -62,7 +62,7 @@
 | **Engagement** 互动 | 识别学习状态并干预 | `student.submission`、`assessment.complete`、`student.message` | `engagement.alert`、`engagement.encouragement`、`engagement.pace_adjustment` | 不改掌握度 |
 
 **共享状态只有一个**：`learner_models: dict[str, LearnerModel]`，由编排器创建、注入给所有 Agent。
-所有 Agent 读它；**只有 Assessment 写掌握度**（单写者），Curriculum 写自己的复习条目。这条纪律在第 14 章会变成「乐观锁」。
+所有 Agent 读它；**只有 Assessment 写掌握度**（单写者），Curriculum 写自己的复习条目。这条纪律在第 14 章会变成「写者收口」：调用点由测试约束，并发控制交给 learner 级锁与数据库事务。
 
 ---
 

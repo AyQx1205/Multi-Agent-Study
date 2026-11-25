@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 from app.agents.base import BaseAgent
 from app.core.cache import BoundedCache

@@ -165,7 +165,7 @@ class LearnerModel:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "LearnerModel":
+    def from_dict(cls, payload: dict[str, Any]) -> LearnerModel:
         model = cls(payload["learner_id"])
         for kid,raw in payload.get("knowledge_states",{}).items():
             model.knowledge_states[kid] = KnowledgeState(**raw)
@@ -175,4 +175,4 @@ class LearnerModel:
         if started:
             model.session_start = datetime.fromisoformat(started)
         return model
-        
+

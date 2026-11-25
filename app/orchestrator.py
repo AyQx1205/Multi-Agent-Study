@@ -4,16 +4,17 @@ import asyncio
 import hashlib
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
-from app.agents import AssessmentAgent, CurriculumAgent,EngagementAgent,HintAgent,TutorAgent
+from app.agents import AssessmentAgent, CurriculumAgent, EngagementAgent, HintAgent, TutorAgent
 from app.config import Settings, get_settings
 from app.core.cache import BoundedCache, LockCache
 from app.core.content import Attempt, Question
-from app.core.errors import IdempotencyConflictError
-from app.core.events import Event, EventType,EventBus
+from app.core.errors import QuestionNotFoundError
+from app.core.events import Event, EventBus, EventType
 from app.core.grading import grade_answer, normalize_answer
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.learner_model import LearnerModel
@@ -23,10 +24,6 @@ from app.metrics import metrics
 from app.store_base import Store
 
 logger = logging.getLogger(__name__)
-
-
-class QuestionNotFoundError(LookupError):
-    """题目不存在；API 层转成 404。"""
 
 
 @dataclass(frozen=True)
@@ -249,7 +246,7 @@ class AgentOrchestrator:
         # 指纹必须用和判分同一套归一化：否则「x = 4」和「x=4」判分相同、
         # 指纹不同，客户端重试会拿到 409 而不是幂等重放。
         fingerprint = hashlib.sha256(
-            f"{question.id}\0{normalize_answer(answer)}".encode("utf-8")
+            f"{question.id}\0{normalize_answer(answer)}".encode()
         ).hexdigest()
         cid = correlation_id or f"c-{uuid.uuid4().hex[:8]}"
 

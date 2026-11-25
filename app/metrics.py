@@ -17,7 +17,7 @@ from collections import defaultdict
 _TEXT_ESCAPES = {"\\": "\\\\", "\n": "\\n", '"': '\\"'}
 
 
-def _escape(value: str) -> str:
+def _escape(value: object) -> str:
     return "".join(_TEXT_ESCAPES.get(ch, ch) for ch in str(value))
 
 

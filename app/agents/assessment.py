@@ -33,7 +33,7 @@ class AssessmentAgent(BaseAgent):
             await self._handle_submission(event)
         elif event.type is EventType.STUDENT_QUESTION:
             await self._handle_question(event)
-        else: 
+        else:
             logger.warning("unhandled event type: %s",event.type)
 
     async def _handle_submission(self, event: Event) -> None:

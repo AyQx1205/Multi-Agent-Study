@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from app.core.events import Event, EventType,EventBus
+from app.core.events import Event, EventBus, EventType
 from app.core.learner_model import LearnerModel
 
 logger = logging.getLogger(__name__)

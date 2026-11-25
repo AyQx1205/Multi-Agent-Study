@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from app.agents.base import BaseAgent
 from app.core.cache import BoundedCache
@@ -176,8 +177,6 @@ class EngagementAgent(BaseAgent):
         eng.state = state
         if state is not previous:
             logger.info("[Engagement] %s: %s -> %s", event.learner_id, previous.value, state.value)
-
-        if state is not previous:
             if state is LearningState.FRUSTRATED:
                 await self._intervene_frustration(event.learner_id, eng, event.correlation_id)
             elif state is LearningState.BORED:

@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import datetime
 from enum import Enum
-from typing import Any,Awaitable,Callable
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 

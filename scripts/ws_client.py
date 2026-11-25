@@ -23,8 +23,8 @@ import httpx
 
 try:
     import websockets
-except ImportError:  # pragma: no cover
-    raise SystemExit("请先安装：pip install websockets")
+except ImportError as exc:  # pragma: no cover
+    raise SystemExit("请先安装：pip install websockets") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,7 +120,7 @@ async def main() -> None:
             while True:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     print("[no more frames]")
                     break
                 frame = json.loads(raw)

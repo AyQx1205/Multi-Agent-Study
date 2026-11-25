@@ -18,7 +18,7 @@ from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, Sess
 from app.core.content import Attempt, Question
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event
-from app.core.learner_model import KnowledgeState, LearnerModel
+from app.core.learner_model import LearnerModel
 from app.core.spaced_repetition import ReviewItem
 from app.store import SqliteStore
 
@@ -38,12 +38,6 @@ class Store(Protocol):
     async def load_reviews(self, learner_id: str) -> dict[str, ReviewItem]: ...
 
     async def save_reviews(self, learner_id: str, items: dict[str, ReviewItem]) -> None: ...
-
-    async def get_version(self, learner_id: str, knowledge_id: str) -> int: ...
-
-    async def compare_and_swap(
-        self, learner_id: str, state: KnowledgeState, expected_version: int
-    ) -> bool: ...
 
     async def append_event(self, event: Event) -> None: ...
 
@@ -210,16 +204,6 @@ class SqliteStoreAdapter:
 
     async def save_reviews(self, learner_id: str, items: dict[str, ReviewItem]) -> None:
         await self._call(self._inner.save_reviews, learner_id, items)
-
-    async def get_version(self, learner_id: str, knowledge_id: str) -> int:
-        return await self._call(self._inner.get_version, learner_id, knowledge_id)
-
-    async def compare_and_swap(
-        self, learner_id: str, state: KnowledgeState, expected_version: int
-    ) -> bool:
-        return await self._call(
-            self._inner.compare_and_swap, learner_id, state, expected_version
-        )
 
     async def append_event(self, event: Event) -> None:
         await self._call(self._inner.append_event, event)

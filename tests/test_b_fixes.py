@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.content import build_junior_math_graph
@@ -70,7 +70,7 @@ async def test_hint_ladder_resets_after_correct_answer(orch, submit) -> None:
 
 
 async def test_new_session_resets_fatigue_timer(make_orch, submit_for) -> None:
-    clock_now = {"t": datetime(2026, 1, 1, 9, 0, 0, tzinfo=timezone.utc)}
+    clock_now = {"t": datetime(2026, 1, 1, 9, 0, 0, tzinfo=UTC)}
 
     def clock() -> datetime:
         return clock_now["t"]

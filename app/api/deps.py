@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -40,8 +40,8 @@ async def get_current_user(
 
     expires_at = session.expires_at
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= datetime.now(timezone.utc):
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= datetime.now(UTC):
         raise _unauthorized("token expired")
 
     user = await store.get_user_by_id(session.user_id)

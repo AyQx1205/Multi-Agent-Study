@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
 from app.core.accounts import Role, User
+from app.core.errors import IdempotencyConflictError, QuestionNotFoundError
 from app.metrics import metrics
-from app.orchestrator import IdempotencyConflictError, QuestionNotFoundError
 from app.security import hash_session_token
 from app.ws_manager import manager
 
@@ -40,7 +39,7 @@ async def _authenticate(websocket: WebSocket, learner_id: str) -> User | None:
     返回认证到的用户；失败时已经关闭连接并返回 None。
     """
     store = websocket.app.state.orchestrator.store
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ticket = websocket.query_params.get("ticket", "")
     if ticket:
         user_id = await store.consume_ws_ticket(hash_session_token(ticket), now)
@@ -65,7 +64,7 @@ async def _authenticate(websocket: WebSocket, learner_id: str) -> User | None:
         return None
     expires_at = session.expires_at
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.replace(tzinfo=UTC)
     if expires_at <= now:
         await websocket.close(code=1008, reason="token expired")
         return None
@@ -112,7 +111,7 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
 
             # 每条消息前复查会话：登出、被禁用、会话过期之后，
             # 已经建立的连接不能继续提交（否则等于一个永久有效的旁路）。
-            if not await store.has_active_session(user.id, datetime.now(timezone.utc)):
+            if not await store.has_active_session(user.id, datetime.now(UTC)):
                 await manager.send(learner_id, {"error": "session_expired"})
                 await websocket.close(code=1008, reason="session expired")
                 break

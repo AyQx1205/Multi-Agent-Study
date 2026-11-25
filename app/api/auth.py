@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -86,7 +86,7 @@ async def _issue_session(
 ) -> tuple[str, datetime]:
     settings = get_settings()
     token = new_session_token()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(hours=settings.session_ttl_hours)
     await request.app.state.orchestrator.store.create_session(
         hash_session_token(token), user.id, now, expires_at
@@ -182,7 +182,7 @@ async def create_organization(
 async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
     settings = get_settings()
     store = request.app.state.orchestrator.store
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     email = req.email.lower().strip()
     ip = client_ip(request) or "unknown"
     # 只锁定「账号 + 来源 IP」组合，避免攻击者用少量失败请求锁死全公司账号。
@@ -296,7 +296,7 @@ async def issue_ws_ticket(
     settings = get_settings()
     store = request.app.state.orchestrator.store
     ticket = new_session_token()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ttl = max(5, min(settings.ws_ticket_ttl_seconds, 300))
     expires_at = now + timedelta(seconds=ttl)
     await store.create_ws_ticket(

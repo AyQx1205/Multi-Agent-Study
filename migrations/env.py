@@ -96,3 +96,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
+# 文件末尾需要一个换行；ruff 的 W292 就是这么要求的。

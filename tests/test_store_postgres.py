@@ -13,7 +13,7 @@ import asyncio
 import importlib.util
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def test_postgres_roundtrip_and_optimistic_lock() -> None:
+async def test_postgres_roundtrip() -> None:
     assert DSN
     store = await PostgresStore.connect(DSN)
     learner_id = f"pg-{uuid.uuid4().hex[:8]}"
@@ -46,12 +46,8 @@ async def test_postgres_roundtrip_and_optimistic_lock() -> None:
         assert loaded is not None
         assert loaded.get_state("arithmetic").attempts == 1
 
-        state = model.get_state("arithmetic")
-        version = await store.get_version(learner_id, "arithmetic")
-        assert version == 1
-        assert await store.compare_and_swap(learner_id, state, version) is True
-        assert await store.compare_and_swap(learner_id, state, version) is False
-        assert await store.get_version(learner_id, "arithmetic") == 2
+        reviews = await store.load_reviews(learner_id)
+        assert reviews == {}
     finally:
         await store.close()
 
@@ -108,7 +104,7 @@ async def test_postgres_auth_tenancy_and_idempotency() -> None:
     store = await PostgresStore.connect(DSN)
     suffix = uuid.uuid4().hex[:8]
     token_hash = f"token-{suffix}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         org = await store.create_organization(f"PG学校{suffix}", f"pg-school-{suffix}")
         admin = await store.create_user(
@@ -314,7 +310,7 @@ async def test_postgres_ws_ticket_is_atomic_and_one_time() -> None:
     store = await PostgresStore.connect(DSN)
     ticket_hash = f"ticket-{uuid.uuid4().hex}"
     user_id = f"pg-user-{uuid.uuid4().hex[:8]}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         await store.create_ws_ticket(
             ticket_hash, user_id, now, now + timedelta(seconds=30)
@@ -329,7 +325,7 @@ async def test_postgres_login_throttle_locks_and_resets() -> None:
     assert DSN
     store = await PostgresStore.connect(DSN)
     key = f"login-test-{uuid.uuid4().hex}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         assert await store.login_locked_until(key, now) is None
         assert (
@@ -371,7 +367,7 @@ async def test_postgres_audit_log_roundtrip() -> None:
         ip="127.0.0.1",
         user_agent="pytest",
         metadata={"role": "admin"},
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     try:
         await store.append_audit_log(entry)

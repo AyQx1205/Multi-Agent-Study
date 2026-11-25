@@ -11,11 +11,8 @@ from app.api.deps import ensure_learner_access, get_principal, require_roles
 from app.config import get_settings
 from app.content import content_summary
 from app.core.accounts import Principal, Role
+from app.core.errors import IdempotencyConflictError, QuestionNotFoundError
 from app.metrics import metrics
-from app.orchestrator import (
-    IdempotencyConflictError,
-    QuestionNotFoundError,
-)
 
 router = APIRouter(tags=["education"])
 

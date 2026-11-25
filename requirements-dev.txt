@@ -1,0 +1,7 @@
+# 开发/CI 依赖。运行时依赖见 requirements.txt。
+# 版本与本地一致，避免 CI 上因为 ruff 新规则/新检查而红。
+ruff==0.12.0
+mypy==1.17.1
+pytest>=8.3
+pytest-asyncio>=0.24
+httpx>=0.28

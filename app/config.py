@@ -22,12 +22,16 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
-    return float(raw) if raw not in (None, "") else default
+    if raw is None or raw == "":
+        return default
+    return float(raw)
 
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
-    return int(raw) if raw not in (None, "") else default
+    if raw is None or raw == "":
+        return default
+    return int(raw)
 
 
 def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -110,7 +114,7 @@ class Settings:
     attempts_retention_days: int = 0
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             mock_llm=_env_bool("MOCK_LLM", True),
             llm_base_url=os.getenv(
@@ -118,7 +122,7 @@ class Settings:
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             # 兼容阿里云常见的 DASHSCOPE_API_KEY 变量名
-            llm_api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY", ""),
+            llm_api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "",
             llm_model=os.getenv("LLM_MODEL", "deepseek-v4.1-flash"),
             llm_timeout_seconds=_env_float("LLM_TIMEOUT_SECONDS", 20.0),
             llm_max_retries=_env_int("LLM_MAX_RETRIES", 2),

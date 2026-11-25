@@ -385,16 +385,21 @@ alembic upgrade head
 
 学习者模型、学习者锁、各 Agent 的按人状态都是 **LRU 有界** 的（`LEARNER_CACHE_SIZE` / `AGENT_STATE_CACHE_SIZE`，默认 2000 / 5000），冷数据淘汰后从数据库重新加载。锁缓存只淘汰**未被持有**的锁，不会破坏互斥。
 
-## 8. 测试
+## 8. 开发与测试
 
 ```powershell
-# 全量（PostgreSQL 测试默认跳过）
-pytest -q
+pip install -r requirements-dev.txt   # ruff / mypy / pytest
+
+ruff check .                          # 静态检查（配置在 pyproject.toml）
+mypy                                  # 类型检查（范围见 pyproject 的 files）
+pytest -q                             # 单元 + 集成（PG 需设 TEST_DATABASE_URL）
 
 # PostgreSQL 集成测试
 $env:TEST_DATABASE_URL = "postgresql://multi_agent:multi_agent_dev@127.0.0.1:5432/multi_agent"
 pytest tests/test_store_postgres.py -q
 ```
+
+CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑：`ruff check` + `mypy` + 全量 pytest（带 `postgres:16` service，PG 集成测试不会被跳过）。任一步失败即阻塞合并。
 
 覆盖点：
 
@@ -408,7 +413,11 @@ pytest tests/test_store_postgres.py -q
 - PostgreSQL 同一学生并发提交的 `advisory lock` 串行化（两个任务最终 attempts=2，不丢更新）；
 - `/live`、`/ready` 探针；
 - Alembic 空库升级 + 旧 `attempts` 表升级；
-- SQLite/PostgreSQL 存储层 roundtrip。
+- SQLite/PostgreSQL 存储层 roundtrip；
+- 并发提交不死锁、事件深度按链隔离、答案延迟揭示、重复作答不计掌握度；
+- 时间口径统一（同一事件在内存与库中时间戳一致）、bootstrap 原子性、登录限流不误锁；
+- 登出切断 WebSocket、交互限流、幂等指纹归一化、LLM 不进锁/不进事务；
+- 内存 LRU 淘汰、过期数据清理、WS 连接上限与心跳、`/metrics` 指标。
 
 ## 9. 还没做的生产项
 

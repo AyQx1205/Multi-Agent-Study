@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.core.content import Attempt
@@ -35,7 +35,7 @@ def test_utcnow_is_aware_utc() -> None:
 
 def test_ensure_utc_treats_naive_as_utc() -> None:
     naive = datetime(2026, 1, 1, 10, 0, 0)
-    assert ensure_utc(naive) == datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    assert ensure_utc(naive) == datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
 
 
 def test_models_normalize_on_construction() -> None:
@@ -52,9 +52,9 @@ def test_models_normalize_on_construction() -> None:
         created_at=naive,
     )
     review = ReviewItem(knowledge_id="k", next_review=naive, last_review=naive)
-    assert event.timestamp.tzinfo is timezone.utc
-    assert attempt.created_at.tzinfo is timezone.utc
-    assert review.next_review.tzinfo is timezone.utc
+    assert event.timestamp.tzinfo is UTC
+    assert attempt.created_at.tzinfo is UTC
+    assert review.next_review.tzinfo is UTC
 
 
 def test_sqlite_event_roundtrip_keeps_the_same_instant() -> None:
@@ -96,7 +96,7 @@ def test_legacy_naive_row_is_read_as_utc() -> None:
     store = SqliteStore(path)
     try:
         loaded = store.get_events("s1")[0]
-        assert loaded.timestamp == datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+        assert loaded.timestamp == datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC)
     finally:
         store.close()
         path.unlink(missing_ok=True)
