@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import ensure_learner_access, get_principal, require_roles
@@ -15,6 +16,9 @@ from app.core.errors import IdempotencyConflictError, QuestionNotFoundError
 from app.metrics import metrics
 
 router = APIRouter(tags=["education"])
+
+# 单文件演示控制台：无构建、无外部 CDN，起服务后直接开 /demo。
+DEMO_PAGE = Path(__file__).resolve().parent.parent / "static" / "demo.html"
 
 
 def _enforce_rate_limit(request: Request, bucket: str, user_id: str, limit: int) -> None:
@@ -88,6 +92,14 @@ async def liveness() -> dict[str, str]:
 async def metrics_endpoint() -> PlainTextResponse:
     """Prometheus 文本格式指标；内网抓取，勿暴露到公网。"""
     return PlainTextResponse(metrics.render())
+
+
+@router.get("/demo", include_in_schema=False)
+async def demo_console() -> FileResponse:
+    """演示用单页控制台（静态 HTML，数据仍需登录后访问）。"""
+    if not DEMO_PAGE.exists():
+        raise HTTPException(status_code=404, detail="demo page not found")
+    return FileResponse(DEMO_PAGE, media_type="text/html")
 
 
 @router.get("/ready")

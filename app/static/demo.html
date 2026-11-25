@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>multi-agent-lite · 演示控制台</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: #131a2e;
+    --panel-2: #0f1526;
+    --border: #24304d;
+    --text: #e6ecff;
+    --muted: #8b9ac0;
+    --accent: #5b8cff;
+    --ok: #35d08a;
+    --bad: #ff6b81;
+    --warn: #ffb454;
+    --hint: #c084fc;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(900px 500px at 15% -10%, #1b2a55 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: rgba(11, 16, 32, 0.75); backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  .spacer { flex: 1; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: 12px; color: var(--muted); background: var(--panel-2);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .dot.off { background: var(--bad); }
+  .link { color: var(--accent); text-decoration: none; font-size: 12px; }
+  .link:hover { text-decoration: underline; }
+
+  main {
+    display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 18px; padding: 18px 22px 40px; max-width: 1500px; margin: 0 auto;
+  }
+  @media (max-width: 1080px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 13px; margin: 0 0 12px; color: var(--muted);
+    font-weight: 600; letter-spacing: .6px; text-transform: uppercase;
+  }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 5px; }
+  input, select, button, textarea { font: inherit; color: var(--text); }
+  input, select {
+    width: 100%; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: #0b1224; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,.15); }
+
+  button {
+    cursor: pointer; border-radius: 10px; border: 1px solid var(--border);
+    background: #1a2340; padding: 10px 14px; transition: .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); transform: translateY(-1px); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary {
+    background: linear-gradient(135deg, #5b8cff, #7a5cff); border: none; font-weight: 600;
+  }
+  button.ghost { background: transparent; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 0 0 auto; }
+
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .qchip {
+    padding: 7px 12px; border-radius: 999px; border: 1px solid var(--border);
+    background: #0b1224; font-size: 12px; cursor: pointer; color: var(--muted);
+  }
+  .qchip:hover { border-color: var(--accent); }
+  .qchip.active { border-color: var(--accent); color: var(--text); background: #16224a; }
+
+  .stem { font-size: 19px; line-height: 1.7; margin: 4px 0 16px; }
+  .stem .katex { font-size: 1.05em; }
+  .options { display: grid; gap: 8px; }
+  .opt {
+    display: flex; align-items: center; gap: 10px; text-align: left;
+    padding: 12px 14px; border-radius: 10px;
+  }
+  .opt .letter {
+    width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+    background: #0b1224; border: 1px solid var(--border); font-size: 12px; color: var(--muted);
+  }
+  .opt.active { border-color: var(--accent); background: #16224a; }
+  .opt.active .letter { background: var(--accent); color: #fff; border-color: transparent; }
+
+  .result { margin-top: 14px; padding: 14px; border-radius: 12px; border: 1px solid var(--border); display: none; }
+  .result.show { display: block; }
+  .result.ok { border-color: rgba(53,208,138,.5); background: rgba(53,208,138,.08); }
+  .result.bad { border-color: rgba(255,107,129,.5); background: rgba(255,107,129,.08); }
+  .result .title { font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+  .result .meta { font-size: 12px; color: var(--muted); }
+  .result .answer { margin-top: 8px; font-size: 14px; }
+  .result .answer code { background: #0b1224; padding: 2px 6px; border-radius: 6px; }
+
+  .bubble { margin-top: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); }
+  .bubble .who { font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .bubble.tutor { border-color: rgba(122,92,255,.45); background: rgba(122,92,255,.08); }
+  .bubble.hint { border-color: rgba(192,132,252,.45); background: rgba(192,132,252,.08); }
+  .bubble.warn { border-color: rgba(255,180,84,.45); background: rgba(255,180,84,.08); }
+
+  .meter { height: 8px; border-radius: 999px; background: #0b1224; overflow: hidden; border: 1px solid var(--border); }
+  .meter > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #35d08a, #5b8cff); transition: width .5s; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-top: 12px; }
+  .stat { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #0b1224; }
+  .stat b { display: block; font-size: 18px; margin-top: 2px; }
+  .stat span { font-size: 11px; color: var(--muted); }
+
+  #log {
+    height: 520px; overflow-y: auto; font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px; line-height: 1.55; padding-right: 6px;
+  }
+  #log .ev {
+    padding: 6px 8px; border-left: 3px solid var(--border); margin-bottom: 6px;
+    background: #0b1224; border-radius: 0 8px 8px 0; animation: slide .25s ease;
+  }
+  @keyframes slide { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+  #log .ev .t { color: var(--muted); }
+  #log .ev .src { font-weight: 700; }
+  #log .ev .data { color: #b9c6e6; word-break: break-all; }
+  #log .empty { color: var(--muted); font-family: inherit; }
+  .s-api { border-left-color: #64748b; }
+  .s-api .src { color: #94a3b8; }
+  .s-AssessmentAgent { border-left-color: #22d3ee; }
+  .s-AssessmentAgent .src { color: #22d3ee; }
+  .s-TutorAgent { border-left-color: #a78bfa; }
+  .s-TutorAgent .src { color: #a78bfa; }
+  .s-HintAgent { border-left-color: #fbbf24; }
+  .s-HintAgent .src { color: #fbbf24; }
+  .s-CurriculumAgent { border-left-color: #34d399; }
+  .s-CurriculumAgent .src { color: #34d399; }
+  .s-EngagementAgent { border-left-color: #f472b6; }
+  .s-EngagementAgent .src { color: #f472b6; }
+
+  .toast {
+    position: fixed; right: 18px; bottom: 18px; padding: 12px 16px; border-radius: 10px;
+    background: #1a2340; border: 1px solid var(--border); font-size: 13px;
+    opacity: 0; transform: translateY(8px); transition: .25s; pointer-events: none; max-width: 360px;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.bad { border-color: var(--bad); }
+  .toast.ok { border-color: var(--ok); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>multi-agent-lite<span>演示控制台</span></h1>
+  <div class="chip" id="userChip"><span class="dot"></span><span id="userText">未登录</span></div>
+  <div class="chip"><span class="dot" id="wsDot"></span><span id="wsText">WS 未连接</span></div>
+  <div class="spacer"></div>
+  <a class="link" href="/docs" target="_blank">Swagger</a>
+  <a class="link" href="/metrics" target="_blank">Metrics</a>
+  <a class="link" href="/health" target="_blank">Health</a>
+</header>
+
+<main>
+  <!-- 左列：登录 / 答题 -->
+  <section>
+    <div class="card" id="loginCard">
+      <h2>1 · 登录</h2>
+      <div class="row">
+        <div style="flex:1 1 160px"><label>学校 slug</label><input id="org" value="demo-school" /></div>
+        <div style="flex:1 1 200px"><label>邮箱</label><input id="email" value="student@demo.local" /></div>
+      </div>
+      <label>密码</label>
+      <input id="password" type="password" placeholder="演示账号密码" />
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="btnLogin">登录并连接 WebSocket</button>
+        <span class="muted">登录后自动申请一次性 ticket 建立 WS</span>
+      </div>
+    </div>
+
+    <div class="card hidden" id="workCard">
+      <h2>2 · 选知识点与题目</h2>
+      <label>知识点</label>
+      <select id="kp"></select>
+      <label>题目</label>
+      <div class="chips" id="questionChips"></div>
+
+      <div style="margin-top:16px">
+        <div class="stem" id="stem">选择一道题开始。</div>
+        <div class="options" id="options"></div>
+        <div id="fillWrap" class="hidden">
+          <label>你的答案</label>
+          <input id="answer" placeholder="输入答案，回车提交" />
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="primary" id="btnSubmit" disabled>提交</button>
+          <button class="ghost" id="btnReplay" disabled title="用同一个 Idempotency-Key 再交一次，验证幂等">同 key 重放</button>
+          <span class="muted" id="hintTip"></span>
+        </div>
+      </div>
+
+      <div class="result" id="result"></div>
+      <div id="bubbles"></div>
+    </div>
+
+    <div class="card hidden" id="progressCard">
+      <h2>3 · 学习进度</h2>
+      <div class="row" style="justify-content:space-between">
+        <span class="muted">平均掌握度</span><b id="masteryText">0%</b>
+      </div>
+      <div class="meter" style="margin-top:8px"><i id="masteryBar"></i></div>
+      <div class="stats">
+        <div class="stat"><span>作答次数</span><b id="statAttempts">0</b></div>
+        <div class="stat"><span>正确率</span><b id="statAccuracy">0%</b></div>
+        <div class="stat"><span>覆盖知识点</span><b id="statPoints">0</b></div>
+        <div class="stat"><span>薄弱点</span><b id="statWeak">0</b></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 右列：事件流 -->
+  <section>
+    <div class="card">
+      <h2>Agent 事件流 <span class="muted" id="logCount"></span></h2>
+      <div id="log"><div class="empty">登录并提交一题后，这里会实时滚动五条 Agent 事件链路。</div></div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end">
+        <button class="ghost" id="btnClear">清空</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  const state = {
+    token: null,
+    user: null,
+    ws: null,
+    wsReady: false,
+    questions: [],
+    current: null,
+    selectedAnswer: null,
+    lastKey: null,
+    shownAt: 0,
+    started: false,
+    eventCount: 0,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+  /* ── 通用请求 ── */
+  async function api(path, opts) {
+    opts = opts || {};
+    const headers = Object.assign({}, opts.headers || {});
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    const res = await fetch(path, Object.assign({}, opts, { headers: headers }));
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+    if (!res.ok) {
+      const err = new Error("HTTP " + res.status);
+      err.status = res.status;
+      err.data = data;
+      err.retryAfter = res.headers.get("Retry-After");
+      throw err;
+    }
+    return data;
+  }
+
+  function toast(msg, kind) {
+    const el = $("toast");
+    el.textContent = msg;
+    el.className = "toast show" + (kind ? " " + kind : "");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { el.className = "toast"; }, 3200);
+  }
+
+  function describeError(err) {
+    if (err.status === 429) {
+      const wait = err.retryAfter ? err.retryAfter + " 秒" : "一会儿";
+      return "被限流了（429），" + wait + "后再试。这是按用户每分钟的配额，不是 bug。";
+    }
+    if (err.status === 409) return "409：同一个 Idempotency-Key 被用于不同答案，换一个 key 再提交。";
+    if (err.status === 403) return "403：当前账号角色不允许调用这个接口（只有学生能答题）。";
+    if (err.status === 401) return "401：会话失效，请重新登录。";
+    if (err.status === 404) return "404：题目不存在。";
+    return "请求失败：" + (err.data && err.data.detail ? err.data.detail : err.message);
+  }
+
+  /* ── 事件流渲染 ── */
+  function renderEvent(frame, stagger) {
+    const log = $("log");
+    const empty = log.querySelector(".empty");
+    if (empty) empty.remove();
+
+    const type = frame.event_type || frame.type || "unknown";
+    const source = frame.source || "api";
+    const wrap = document.createElement("div");
+    wrap.className = "ev s-" + source.replace(/[^\w]/g, "");
+    const ts = (frame.timestamp || "").slice(11, 19);
+    const data = frame.data ? JSON.stringify(frame.data) : "";
+    wrap.innerHTML =
+      '<div><span class="t">' + esc(ts) + "</span> " +
+      '<span class="src">' + esc(source) + "</span> " +
+      "<span>" + esc(type) + "</span></div>" +
+      (data ? '<div class="data">' + esc(data.length > 260 ? data.slice(0, 260) + "…" : data) + "</div>" : "");
+
+    if (stagger) wrap.style.animationDelay = stagger + "ms";
+    log.appendChild(wrap);
+    state.eventCount += 1;
+    while (log.children.length > 200) log.removeChild(log.firstChild);
+    log.scrollTop = log.scrollHeight;
+    $("logCount").textContent = "· " + state.eventCount + " 条";
+  }
+
+  /* ── WebSocket ── */
+  function setWsStatus(ok, text) {
+    $("wsDot").className = "dot " + (ok ? "on" : "off");
+    $("wsText").textContent = text;
+  }
+
+  async function connectWs() {
+    try {
+      const data = await api("/auth/ws-ticket", { method: "POST" });
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = proto + "//" + location.host + "/ws/" + state.user.id +
+        "?ticket=" + encodeURIComponent(data.ticket);
+      const ws = new WebSocket(url);
+      state.ws = ws;
+
+      ws.onopen = function () { state.wsReady = true; setWsStatus(true, "WS 已连接"); };
+      ws.onclose = function () { state.wsReady = false; setWsStatus(false, "WS 已断开"); };
+      ws.onerror = function () { setWsStatus(false, "WS 异常"); };
+
+      ws.onmessage = function (ev) {
+        let frame;
+        try { frame = JSON.parse(ev.data); } catch (e) { return; }
+        if (frame.event_type === "heartbeat") { setWsStatus(true, "WS 已连接 · 心跳"); return; }
+        if (frame.event_type === "pong") return;
+        if (frame.error) {
+          if (frame.error === "rate_limited") toast("WebSocket 侧被限流，稍后再试", "bad");
+          else if (frame.error === "session_expired") { toast("会话已失效，请重新登录", "bad"); setWsStatus(false, "会话过期"); }
+          else toast("服务端错误：" + frame.error, "bad");
+          return;
+        }
+        if (frame.event_type === "submission.result") { renderResult(frame); return; }
+        renderEvent(frame);
+      };
+    } catch (err) {
+      setWsStatus(false, "WS 连接失败");
+      toast("WebSocket 建立失败，将回退到 HTTP 提交", "bad");
+    }
+  }
+
+  /* ── 登录 ── */
+  async function login() {
+    const btn = $("btnLogin");
+    btn.disabled = true;
+    try {
+      const body = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({
+          org_slug: $("org").value.trim(),
+          email: $("email").value.trim(),
+          password: $("password").value,
+        }),
+      });
+      state.token = body.access_token;
+      state.user = body.user;
+      $("userChip").querySelector(".dot").className = "dot on";
+      $("userText").textContent = body.user.display_name + " · " + body.user.role;
+      $("loginCard").classList.add("hidden");
+      $("workCard").classList.remove("hidden");
+      $("progressCard").classList.remove("hidden");
+      toast("登录成功，正在建立 WebSocket…", "ok");
+      await connectWs();
+      await loadKnowledge();
+      await refreshProgress();
+      state.started = true;
+    } catch (err) {
+      toast(describeError(err), "bad");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ── 知识点与题目 ── */
+  async function loadKnowledge() {
+    const graph = await api("/knowledge-graph");
+    const select = $("kp");
+    select.innerHTML = "";
+    const byGrade = {};
+    graph.nodes.forEach(function (n) { (byGrade[n.grade] = byGrade[n.grade] || []).push(n); });
+    Object.keys(byGrade).sort().forEach(function (grade) {
+      const group = document.createElement("optgroup");
+      group.label = grade + " 年级";
+      byGrade[grade].forEach(function (node) {
+        const opt = document.createElement("option");
+        opt.value = node.id;
+        opt.textContent = node.name + "（难度 " + node.difficulty + "）";
+        group.appendChild(opt);
+      });
+      select.appendChild(group);
+    });
+    select.onchange = function () { loadQuestions(select.value); };
+    if (select.value) await loadQuestions(select.value);
+  }
+
+  async function loadQuestions(knowledgeId) {
+    const data = await api("/questions?knowledge_id=" + encodeURIComponent(knowledgeId) + "&limit=20");
+    state.questions = data.items || [];
+    const box = $("questionChips");
+    box.innerHTML = "";
+    if (!state.questions.length) {
+      box.innerHTML = '<span class="muted">这个知识点没有题目。</span>';
+      return;
+    }
+    state.questions.forEach(function (q, index) {
+      const chip = document.createElement("button");
+      chip.className = "qchip";
+      chip.textContent = "第 " + (index + 1) + " 题";
+      chip.onclick = function () { selectQuestion(index, chip); };
+      box.appendChild(chip);
+    });
+    selectQuestion(0, box.firstChild);
+  }
+
+  function selectQuestion(index, chip) {
+    Array.prototype.forEach.call($("questionChips").children, function (c) {
+      c.classList.remove("active");
+    });
+    if (chip) chip.classList.add("active");
+    const q = state.questions[index];
+    state.current = q;
+    state.selectedAnswer = null;
+    state.lastKey = null;
+    state.shownAt = Date.now();
+    $("result").className = "result";
+    $("bubbles").innerHTML = "";
+    $("btnReplay").disabled = true;
+    $("btnSubmit").disabled = false;
+    $("stem").textContent = q.stem;
+    $("hintTip").textContent = "";
+
+    const options = $("options");
+    options.innerHTML = "";
+    if (q.type === "choice" && q.options && q.options.length) {
+      $("fillWrap").classList.add("hidden");
+      q.options.forEach(function (text, i) {
+        const btn = document.createElement("button");
+        btn.className = "opt";
+        btn.innerHTML = '<span class="letter">' + "ABCD"[i] + "</span><span>" + esc(text) + "</span>";
+        btn.onclick = function () {
+          Array.prototype.forEach.call(options.children, function (c) { c.classList.remove("active"); });
+          btn.classList.add("active");
+          state.selectedAnswer = text;
+        };
+        options.appendChild(btn);
+      });
+    } else {
+      $("fillWrap").classList.remove("hidden");
+      $("answer").value = "";
+      $("answer").focus();
+    }
+  }
+
+  function currentAnswer() {
+    if (!state.current) return null;
+    if (state.current.type === "choice") return state.selectedAnswer;
+    const value = $("answer").value.trim();
+    return value || null;
+  }
+
+  /* ── 提交 ── */
+  async function submit(reuseKey) {
+    if (!state.current) return;
+    const answer = currentAnswer();
+    if (!answer) { toast("请先作答", "bad"); return; }
+
+    const key = reuseKey && state.lastKey ? state.lastKey : crypto.randomUUID();
+    state.lastKey = key;
+    const elapsed = Math.max(1, Math.round((Date.now() - state.shownAt) / 1000));
+    const payload = {
+      action: "submit",
+      idempotency_key: key,
+      question_id: state.current.id,
+      answer: answer,
+      time_spent_seconds: elapsed,
+    };
+
+    $("btnSubmit").disabled = true;
+    $("btnReplay").disabled = true;
+
+    if (state.wsReady && state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify(payload));
+      // WS 侧由 onmessage 渲染；解开按钮由 renderResult 负责
+      return;
+    }
+
+    // 回退：HTTP 提交。事件按 120ms 间隔逐条渲染，观感接近实时。
+    try {
+      const res = await api("/submit", {
+        method: "POST",
+        headers: { "Idempotency-Key": key },
+        body: JSON.stringify({
+          question_id: payload.question_id,
+          answer: payload.answer,
+          time_spent_seconds: payload.time_spent_seconds,
+        }),
+      });
+      renderResult(res);
+      (res.events || []).forEach(function (e, i) {
+        setTimeout(function () { renderEvent(e); }, i * 120);
+      });
+    } catch (err) {
+      toast(describeError(err), "bad");
+      $("btnSubmit").disabled = false;
+    }
+  }
+
+  /* ── 结果与卡片 ── */
+  function renderResult(res) {
+    const box = $("result");
+    const ok = res.is_correct === true;
+    box.className = "result show " + (ok ? "ok" : "bad");
+
+    const meta = [];
+    meta.push("第 " + res.attempts_for_question + " 次作答");
+    meta.push(res.counts_toward_mastery ? "计入掌握度" : "仅练习，不计掌握度");
+    if (res.replayed) meta.push("幂等重放（没有重复计分）");
+
+    let answerHtml = "";
+    if (res.answer_revealed) {
+      answerHtml = '<div class="answer">标准答案：<code>' + esc(res.correct_answer || "") +
+        "</code>" + (res.explanation ? "　解析：" + esc(res.explanation) : "") + "</div>";
+    } else {
+      answerHtml = '<div class="answer muted">本次不揭示答案：答对、或累计答错达到阈值后才会显示。</div>';
+    }
+
+    box.innerHTML =
+      '<div class="title">' + (ok ? "✅ 答对了" : "❌ 再想想") + "</div>" +
+      '<div class="meta">' + esc(meta.join(" · ")) + "</div>" + answerHtml;
+
+    $("bubbles").innerHTML = "";
+    const events = res.events || [];
+    const teaching = events.filter(function (e) {
+      return (e.type || e.event_type) === "tutor.teaching_response";
+    }).pop();
+    const hint = events.filter(function (e) {
+      return (e.type || e.event_type) === "hint.response";
+    }).pop();
+
+    if (hint) {
+      addBubble("hint", "HintAgent · 第 " + hint.data.hint_level + " 级提示（" +
+        esc(hint.data.hint_level_name || "") + "）", hint.data.hint_text);
+    }
+    if (teaching) {
+      const style = teaching.data.teaching_style === "hint" ? "提示转发" : "苏格拉底式引导";
+      addBubble("tutor", "TutorAgent · " + style, teaching.data.response);
+    }
+
+    $("hintTip").textContent = res.replayed
+      ? "同一个 key 重放：服务端没有重复计分"
+      : "题目 key 已记录，可点「同 key 重放」演示幂等";
+
+    $("btnSubmit").disabled = false;
+    $("btnReplay").disabled = !state.lastKey;
+    refreshProgress();
+  }
+
+  function addBubble(kind, who, text) {
+    const el = document.createElement("div");
+    el.className = "bubble " + kind;
+    el.innerHTML = '<div class="who">' + esc(who) + '</div><div>' + esc(text) + "</div>";
+    $("bubbles").appendChild(el);
+  }
+
+  /* ── 进度 ── */
+  async function refreshProgress() {
+    if (!state.user) return;
+    try {
+      const data = await api("/progress/" + state.user.id);
+      const p = data.progress || {};
+      const mastery = typeof p.avg_mastery === "number" ? p.avg_mastery : 0;
+      $("masteryText").textContent = Math.round(mastery * 100) + "%";
+      $("masteryBar").style.width = Math.round(mastery * 100) + "%";
+      $("statAttempts").textContent = p.total_attempts || 0;
+      $("statAccuracy").textContent = Math.round((p.accuracy || 0) * 100) + "%";
+      $("statPoints").textContent = p.total_knowledge_points || 0;
+      $("statWeak").textContent = (data.weak_points || []).length;
+    } catch (err) {
+      if (err.status !== 401) console.warn(err);
+    }
+  }
+
+  /* ── 绑定 ── */
+  $("btnLogin").onclick = login;
+  $("password").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") login();
+  });
+  $("btnSubmit").onclick = function () { submit(false); };
+  $("btnReplay").onclick = function () { submit(true); };
+  $("answer").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") submit(false);
+  });
+  $("btnClear").onclick = function () {
+    $("log").innerHTML = '<div class="empty">已清空。继续提交一道题看看。</div>';
+    state.eventCount = 0;
+    $("logCount").textContent = "";
+  };
+})();
+</script>
+</body>
+</html>

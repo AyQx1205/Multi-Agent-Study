@@ -299,6 +299,7 @@ python scripts\ws_client.py `
 | GET | `/live` | 存活探针（不查库） |
 | GET | `/ready` | 就绪探针（数据库与核心表可用返回 200，否则 503） |
 | GET | `/metrics` | Prometheus 文本指标 |
+| GET | `/demo` | 演示用单页控制台（静态 HTML，数据需登录访问） |
 | POST | `/auth/bootstrap` | 首次创建学校+管理员 |
 | POST | `/auth/login` | 登录 |
 | POST | `/auth/logout` | 撤销当前会话 |
@@ -322,6 +323,30 @@ python scripts\ws_client.py `
 | WS | `/ws/{learner_id}?ticket=...` | 实时答题/事件（一次性 ticket） |
 
 交互文档：<http://127.0.0.1:8000/docs>。在 Swagger 里先登录拿 token，再点右上角 **Authorize** 填 `Bearer <token>`；`Idempotency-Key` 在 `/submit` 的请求头里填。
+
+### 演示控制台
+
+起服务后打开 <http://127.0.0.1:8000/demo>：一个**单文件**演示控制台（无构建、无外部 CDN，断网可用）。
+
+- 登录后自动申请一次性 ticket 建 WebSocket；
+- 左侧选知识点/题目、作答；右侧实时滚动 `student.submission → assessment.mastery_updated → curriculum.review_scheduled → tutor.teaching_response` 的完整 Agent 事件链；
+- 「同 key 重放」按钮演示幂等：同一个 `Idempotency-Key` 再交一次，返回 `replayed=true` 且不重复计分；
+- WS 不可用时自动回退到 HTTP 提交（事件按顺序逐条渲染）。
+
+默认填充 `org=demo-school`、`email=student@demo.local`。先按 §2 建好这个学生：
+
+```powershell
+# 1) 首次 bootstrap（只允许一次）
+#    org_slug = demo-school, admin_email = admin@demo.local
+# 2) 用管理员 token 建学生
+$body = @{ email = "student@demo.local"; password = "demo-student-123";
+           display_name = "演示学生"; role = "student" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/auth/users `
+  -Headers @{ Authorization = "Bearer <admin_token>" } `
+  -ContentType "application/json" -Body $body
+```
+
+> 页面本身是静态文件，不含任何数据；所有接口仍然要登录 + 角色校验。
 
 ## 6. Alembic 迁移
 

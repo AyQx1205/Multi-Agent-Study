@@ -25,6 +25,17 @@ def test_health_is_public(client: TestClient) -> None:
     assert body["content"]["questions"] == 180
 
 
+def test_demo_console_is_served(client: TestClient) -> None:
+    response = client.get("/demo")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    body = response.text
+    assert "multi-agent-lite" in body
+    # 页面必须走一次性 ticket 建 WS，且自带幂等键逻辑
+    assert "/auth/ws-ticket" in body
+    assert "idempotency_key" in body
+
+
 def test_liveness_and_readiness(client: TestClient) -> None:
     live = client.get("/live")
     assert live.status_code == 200
