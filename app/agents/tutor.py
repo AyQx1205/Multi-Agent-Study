@@ -171,7 +171,7 @@ class TutorAgent(BaseAgent):
         level: str,
         mastery: float,
         correlation_id: str | None = None,
-    ) -> None:
+    ) -> Event:
         """事务提交后补一条 LLM 讲解（TUTOR_LLM_FOR_ANSWERS=true 时）。"""
         response = await self._generate(
             knowledge_id=knowledge_id,
@@ -180,10 +180,11 @@ class TutorAgent(BaseAgent):
             is_correct=None,
             question="",
         )
-        await self.emit(
-            EventType.TEACHING_RESPONSE,
-            learner_id,
-            {
+        event = Event(
+            type=EventType.TEACHING_RESPONSE,
+            source=self.name,
+            learner_id=learner_id,
+            data={
                 "knowledge_id": knowledge_id,
                 "response": response,
                 "teaching_style": "socratic",
@@ -192,6 +193,8 @@ class TutorAgent(BaseAgent):
             },
             correlation_id=correlation_id,
         )
+        await self.event_bus.publish(event)
+        return event
 
     async def _handle_engagement_alert(self, event: Event) -> None:
         alert_type = event.data.get("alert_type", "")

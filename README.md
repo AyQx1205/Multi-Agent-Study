@@ -71,6 +71,8 @@ alembic current
 
 > 开发模式 `AUTO_APPLY_SCHEMA=true` 会自动建表，方便快速启动；生产环境建议设为 `false`，先执行 `alembic upgrade head`，只允许迁移改表。
 
+启动时会幂等导入题库：**只写内容有变化的题**，日志里打印的是实际写入条数（`180 questions unchanged` 表示题库没变）。
+
 ## 2. 认证与租户
 
 ### 角色

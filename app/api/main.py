@@ -69,8 +69,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("persistence: sqlite (%s)", settings.sqlite_path)
 
     graph = build_junior_math_graph()
-    seeded = await store.seed_questions(build_junior_math_questions())
-    logger.info("content ready: %d knowledge nodes, %d questions", len(graph.nodes), seeded)
+    seed_questions = build_junior_math_questions()
+    changed = await store.seed_questions(seed_questions)
+    if changed:
+        logger.info(
+            "content ready: %d knowledge nodes, %d/%d questions written",
+            len(graph.nodes),
+            changed,
+            len(seed_questions),
+        )
+    else:
+        logger.info(
+            "content ready: %d knowledge nodes, %d questions unchanged",
+            len(graph.nodes),
+            len(seed_questions),
+        )
 
     llm = build_llm(settings)
     app.state.llm_mode = "mock" if isinstance(llm, MockLLM) else settings.llm_model

@@ -93,6 +93,37 @@ def test_curated_geometry_questions_are_present() -> None:
     assert questions["q-triangle-1"].answer
 
 
+def test_every_curated_node_has_curated_content() -> None:
+    """声明 kind="curated" 的节点必须真的在 CURATED 里有题。
+
+    之前 `intersecting_lines` 漏了，`_curated` 静默回退到占位题，
+    每个节点的题数还是 3，所以只数数量的测试完全发现不了。
+    """
+    from app.content.junior_questions import CURATED
+    from app.content.specs import NODES
+
+    curated_specs = {spec.id for spec in NODES if spec.kind == "curated"}
+    assert curated_specs <= set(CURATED), f"缺少 CURATED 条目: {curated_specs - set(CURATED)}"
+
+
+def test_no_placeholder_questions() -> None:
+    """题库里不能出现「答案：略」这类占位题。"""
+    for question in build_junior_math_questions():
+        assert question.answer not in {"略", "", "TODO"}, question.id
+        assert "英文关键词" not in question.stem, question.id
+        assert "你最想问老师" not in question.stem, question.id
+
+
+def test_intersecting_lines_is_answerable() -> None:
+    """被漏掉的那个知识点：现在应该是真实题目且有正确答案。"""
+    questions = {q.id: q for q in build_junior_math_questions()}
+    first = questions["q-intersecting_lines-1"]
+    assert first.answer in "ABCD"
+    correct_text = first.options["ABCD".index(first.answer)]
+    assert grade_answer(first, correct_text)
+    assert not grade_answer(first, "____")
+
+
 def test_unknown_generator_is_not_silently_used() -> None:
     # 这个测试保护“新增节点必须补题”的约束：内容入口会抛错而不是返回空题。
     from app.content import junior_math

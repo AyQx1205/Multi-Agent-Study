@@ -41,6 +41,9 @@ class SubmissionOutcome:
     attempts_for_question: int
     counts_toward_mastery: bool
     reveal_answer: bool
+    # 揭示时才填；由事务里那份 Question 直接带出，避免提交后再查一次库。
+    revealed_answer: str | None = None
+    revealed_explanation: str = ""
 
 
 class AgentOrchestrator:
@@ -91,12 +94,38 @@ class AgentOrchestrator:
             mastery_threshold=self.settings.mastery_threshold,
         )
         self.hint = HintAgent("HintAgent", self.event_bus, self.learner_models)
-        self.engagement = EngagementAgent("EngagementAgent", self.event_bus, self.learner_models, clock=clock)
+        self.engagement = EngagementAgent(
+            "EngagementAgent",
+            self.event_bus,
+            self.learner_models,
+            clock=clock,
+            session_gap_seconds=self.settings.engagement_session_gap_minutes * 60,
+        )
 
     # ── 持久化：加载 / 保存 / 事件落库 ──
     def _lock(self, learner_id: str) -> asyncio.Lock:
         """单进程内串行化同一 learner；跨进程/多实例由存储层 learner 锁兜底。"""
         return self._locks.setdefault(learner_id, asyncio.Lock())
+
+    async def _publish_and_collect(
+        self, event: Event, *, raise_errors: bool = False
+    ) -> list[Event]:
+        """发布事件并收集这条链路上的全部事件。
+
+        不能用 `get_history(correlation_id=...)`：那是从全局环形缓冲里过滤，
+        并发提交多时本次链路可能已经被挤出窗口，响应的 `events` 会缺事件。
+        """
+        collected: list[Event] = []
+
+        async def collect(inner: Event) -> None:
+            collected.append(inner)
+
+        self.event_bus.subscribe_all(collect)
+        try:
+            await self.event_bus.publish(event, raise_errors=raise_errors)
+        finally:
+            self.event_bus.unsubscribe_all(collect)
+        return collected
 
     async def _persist_event(self, event: Event) -> None:
         if self.store is None:
@@ -225,7 +254,8 @@ class AgentOrchestrator:
             )
             self.event_bus.begin_strict(cid)
             try:
-                await self.event_bus.publish(
+                # 用收集器而不是全局历史：全局环形缓冲会把本次链路挤出去。
+                events = await self._publish_and_collect(
                     Event(
                         type=EventType.STUDENT_SUBMISSION,
                         source="api",
@@ -244,9 +274,6 @@ class AgentOrchestrator:
                         correlation_id=cid,
                     ),
                     raise_errors=True,
-                )
-                events = self.event_bus.get_history(
-                    correlation_id=cid, limit=200
                 )
             finally:
                 self.event_bus.end_strict(cid)
@@ -295,9 +322,13 @@ class AgentOrchestrator:
         if self.settings.tutor_llm_for_answers and not replayed:
             # LLM 讲解放到事务提交之后、锁之外：进事务会把数据库锁的持有时间
             # 从毫秒拉到秒级，直接把并发写能力打没。
-            await self._enrich_teaching_response(learner_id, question.knowledge_id, cid)
-            events = self.event_bus.get_history(correlation_id=cid, limit=200)
+            enriched = await self._enrich_teaching_response(
+                learner_id, question.knowledge_id, cid
+            )
+            if enriched is not None:
+                events = [*events, enriched]
 
+        reveal_answer = attempt.is_correct or attempts_for_question >= reveal_after
         return SubmissionOutcome(
             events=events,
             attempt=attempt,
@@ -305,25 +336,26 @@ class AgentOrchestrator:
             attempts_for_question=attempts_for_question,
             counts_toward_mastery=counts_toward_mastery,
             # 答对就揭示；答错则要等尝试次数达到阈值，避免「一次乱答换答案」。
-            reveal_answer=attempt.is_correct
-            or attempts_for_question >= reveal_after,
+            reveal_answer=reveal_answer,
+            revealed_answer=question.answer if reveal_answer else None,
+            revealed_explanation=question.explanation if reveal_answer else "",
         )
 
     async def _enrich_teaching_response(
         self, learner_id: str, knowledge_id: str, correlation_id: str
-    ) -> None:
+    ) -> Event | None:
         """答题事务提交后，在锁外补一条 LLM 讲解（仅当 TUTOR_LLM_FOR_ANSWERS=true）。
 
         失败要吞掉：讲解是锦上添花，不能因为模型超时把已经成功的提交变成 500。
         """
         model = self.learner_models.get(learner_id)
         if model is None:
-            return
+            return None
         state = model.peek_state(knowledge_id)
         mastery = state.mastery if state is not None else model.bkt.p_init
         level = state.level.value if state is not None else "not_started"
         try:
-            await self.tutor.enrich_answer(
+            return await self.tutor.enrich_answer(
                 learner_id=learner_id,
                 knowledge_id=knowledge_id,
                 level=level,
@@ -332,6 +364,7 @@ class AgentOrchestrator:
             )
         except Exception:
             logger.exception("post-submit teaching enrichment failed")
+            return None
 
     async def get_questions(
         self,
@@ -359,7 +392,7 @@ class AgentOrchestrator:
         async with self._lock(learner_id):
             await self._ensure_loaded(learner_id)
         cid = f"c-{uuid.uuid4().hex[:8]}"
-        await self.event_bus.publish(
+        return await self._publish_and_collect(
             Event(
                 type=EventType.STUDENT_QUESTION,
                 source="api",
@@ -371,13 +404,12 @@ class AgentOrchestrator:
                 correlation_id=cid
             )
         )
-        return self.event_bus.get_history(correlation_id=cid,limit=200)
 
     async def send_message(self,learner_id: str,message: str,knowledge_id: str = "general") -> list[Event]:
         async with self._lock(learner_id):
             await self._ensure_loaded(learner_id)
         cid = f"c-{uuid.uuid4().hex[:8]}"
-        await self.event_bus.publish(
+        return await self._publish_and_collect(
             Event(
                 type=EventType.STUDENT_MESSAGE,
                 source="api",
@@ -389,7 +421,6 @@ class AgentOrchestrator:
                 correlation_id=cid
             )
         )
-        return self.event_bus.get_history(correlation_id=cid,limit=200)
 
     def get_learner_progress(self,learner_id: str) -> dict[str,Any]:
         model = self.learner_models.get(learner_id)

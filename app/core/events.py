@@ -72,6 +72,8 @@ class EventBus:
         self._subscribers: dict[EventType, list[EventHandler]] = {}
         self._history: list[Event] = []
         self._lock = asyncio.Lock()
+        # 订阅全部事件类型的 handler（例如「收集本次提交的完整事件链」）。
+        self._all_handlers: list[EventHandler] = []
         # 同步提交期间，该 correlation 下的嵌套事件也必须把错误传回事务边界。
         self._strict_correlations: set[str] = set()
 
@@ -83,6 +85,15 @@ class EventBus:
         handlers = self._subscribers.get(event_type)
         if handlers and handler in handlers:
             handlers.remove(handler)
+
+    def subscribe_all(self, handler: EventHandler) -> None:
+        """订阅所有事件类型（用于一次请求内收集完整事件链）。"""
+        if handler not in self._all_handlers:
+            self._all_handlers.append(handler)
+
+    def unsubscribe_all(self, handler: EventHandler) -> None:
+        if handler in self._all_handlers:
+            self._all_handlers.remove(handler)
 
     def begin_strict(self, correlation_id: str) -> None:
         self._strict_correlations.add(correlation_id)
@@ -111,7 +122,7 @@ class EventBus:
             if len(self._history) > HISTORY_LIMIT:
                 del self._history[:len(self._history) - HISTORY_LIMIT]
 
-        handlers = list(self._subscribers.get(event.type, []))
+        handlers = list(self._subscribers.get(event.type, [])) + list(self._all_handlers)
         if not handlers:
             logger.debug("no handler for %s", event.type.value)
             return

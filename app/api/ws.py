@@ -172,12 +172,6 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                     continue
                 events = outcome.events
                 attempt = outcome.attempt
-                # 与 HTTP /submit 保持一致：未到揭示阈值时不返回标准答案。
-                revealed = (
-                    await orch.get_question(attempt.question_id)
-                    if outcome.reveal_answer
-                    else None
-                )
                 await manager.send(
                     learner_id,
                     {
@@ -186,8 +180,8 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                         "question_id": attempt.question_id,
                         "knowledge_id": attempt.knowledge_id,
                         "is_correct": attempt.is_correct,
-                        "correct_answer": revealed.answer if revealed else None,
-                        "explanation": revealed.explanation if revealed else "",
+                        "correct_answer": outcome.revealed_answer,
+                        "explanation": outcome.revealed_explanation,
                         "answer_revealed": outcome.reveal_answer,
                         "attempts_for_question": outcome.attempts_for_question,
                         "counts_toward_mastery": outcome.counts_toward_mastery,

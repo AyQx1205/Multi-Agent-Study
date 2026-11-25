@@ -26,6 +26,7 @@ from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
 from app.core.spaced_repetition import ReviewItem
 from app.core.timeutil import ensure_utc, utcnow
+from app.store import _question_signature
 
 try:
     import asyncpg
@@ -1186,26 +1187,47 @@ class PostgresStore:
 
     # ── 题库与答题记录 ──
     async def seed_questions(self, questions: list[Question]) -> int:
-        rows = [
-            (
-                question.id,
-                question.knowledge_id,
-                question.grade,
-                question.type.value,
-                question.stem,
-                json.dumps(question.options, ensure_ascii=False),
-                question.answer,
-                json.dumps(question.accepted, ensure_ascii=False),
-                question.explanation,
-                question.difficulty,
-                question.source,
-                question.version,
-            )
-            for question in questions
-        ]
-        if not rows:
+        """只写内容有变化的题；返回实际写入条数。"""
+        if not questions:
             return 0
         async with self.pool.acquire() as conn:
+            existing_rows = await conn.fetch(
+                """
+                SELECT id, knowledge_id, grade, type, stem, options::text AS options,
+                       answer, accepted::text AS accepted, explanation, difficulty,
+                       source, version
+                FROM questions
+                WHERE id = ANY($1::text[])
+                """,
+                [question.id for question in questions],
+            )
+            existing = {
+                row["id"]: self._question_signature_from_row(row) for row in existing_rows
+            }
+            changed = [
+                question
+                for question in questions
+                if existing.get(question.id) != _question_signature(question)
+            ]
+            if not changed:
+                return 0
+            rows = [
+                (
+                    question.id,
+                    question.knowledge_id,
+                    question.grade,
+                    question.type.value,
+                    question.stem,
+                    json.dumps(question.options, ensure_ascii=False),
+                    question.answer,
+                    json.dumps(question.accepted, ensure_ascii=False),
+                    question.explanation,
+                    question.difficulty,
+                    question.source,
+                    question.version,
+                )
+                for question in changed
+            ]
             async with conn.transaction():
                 await conn.executemany(
                     """
@@ -1229,6 +1251,27 @@ class PostgresStore:
                     rows,
                 )
         return len(rows)
+
+    @staticmethod
+    def _question_signature_from_row(row: Any) -> tuple:
+        def _as_json(value: Any) -> str:
+            return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+        options = row["options"]
+        accepted = row["accepted"]
+        return (
+            row["knowledge_id"],
+            row["grade"],
+            row["type"],
+            row["stem"],
+            _as_json(json.loads(options) if isinstance(options, str) else options),
+            row["answer"],
+            _as_json(json.loads(accepted) if isinstance(accepted, str) else accepted),
+            row["explanation"],
+            row["difficulty"],
+            row["source"],
+            row["version"],
+        )
 
     @staticmethod
     def _question_from_row(row: Any) -> Question:

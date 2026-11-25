@@ -168,8 +168,6 @@ async def submit_answer(
 
     attempt = outcome.attempt
     events = outcome.events
-    # 只有允许揭示时才查题拿答案，避免把标准答案无条件返回给学生。
-    question = await orch.get_question(attempt.question_id) if outcome.reveal_answer else None
     return {
         "status": "replayed" if outcome.replayed else "processed",
         "replayed": outcome.replayed,
@@ -177,8 +175,8 @@ async def submit_answer(
         "question_id": attempt.question_id,
         "knowledge_id": attempt.knowledge_id,
         "is_correct": attempt.is_correct,
-        "correct_answer": question.answer if question else None,
-        "explanation": question.explanation if question else "",
+        "correct_answer": outcome.revealed_answer,
+        "explanation": outcome.revealed_explanation,
         "answer_revealed": outcome.reveal_answer,
         "attempts_for_question": outcome.attempts_for_question,
         "counts_toward_mastery": outcome.counts_toward_mastery,

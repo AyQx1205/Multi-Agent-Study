@@ -47,11 +47,26 @@ class HintAgent(BaseAgent):
 
     @property
     def subscribed_events(self) -> list[EventType]:
-        return [EventType.HINT_NEEDED]
+        return [EventType.HINT_NEEDED, EventType.ASSESSMENT_COMPLETE]
 
     async def handle_event(self, event: Event) -> None:
         if event.type is EventType.HINT_NEEDED:
             await self._provide_hint(event)
+        elif event.type is EventType.ASSESSMENT_COMPLETE:
+            self._reset_after_correct(event)
+
+    def _reset_after_correct(self, event: Event) -> None:
+        """答对之后把提示阶梯清零。
+
+        否则 `_hint_history` 只增不减：学生历史上拿过 4 次提示后，
+        之后每次卡住都直接跳到「给具体解法」，再也回不到第一级。
+        """
+        if event.data.get("is_correct") is not True:
+            return
+        knowledge_id = event.data.get("knowledge_id")
+        if not knowledge_id:
+            return
+        self._hint_history.pop(f"{event.learner_id}:{knowledge_id}", None)
 
     @staticmethod
     def decide_level(hint_count: int, mastery: float, attempts: int) -> int:

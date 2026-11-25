@@ -20,7 +20,9 @@ def test_intervals_grow_1_6_then_multiply() -> None:
     sr.review(item, 5, now=NOW + timedelta(days=1))
     assert item.interval_days == 6
     sr.review(item, 5, now=NOW + timedelta(days=7))
-    assert item.interval_days == pytest.approx(15)
+    # 第三次起按当前 EF 增长；EF 会随连续答对上升（不再是恒定的 2.5）
+    assert item.interval_days == pytest.approx(6 * item.easiness_factor)
+    assert item.interval_days > 15
 
 
 def test_quality_below_3_resets() -> None:
@@ -38,7 +40,15 @@ def test_ef_bounds() -> None:
     easy = ReviewItem(knowledge_id="e", next_review=NOW)
     for _ in range(3):
         sr.review(easy, 5, now=NOW)
-    assert easy.easiness_factor == pytest.approx(2.5)
+    # 连续答对必须让 EF 上升（旧实现上限 2.5 == 初始值，等于永远不涨）
+    assert easy.easiness_factor > 2.5
+    assert easy.easiness_factor == pytest.approx(2.8)
+
+    for _ in range(2):
+        sr.review(easy, 5, now=NOW)
+    # 有上限（3.0），不会无限增长
+    assert easy.easiness_factor == pytest.approx(3.0)
+    assert easy.easiness_factor <= 3.0
 
     hard = ReviewItem(knowledge_id="h", next_review=NOW)
     for _ in range(6):

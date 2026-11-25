@@ -132,9 +132,14 @@ def test_question_bank_roundtrip(store_path) -> None:
         difficulty=1,
     )
     assert store.seed_questions([question]) == 1
-    # 幂等
-    assert store.seed_questions([question]) == 1
+    # 幂等：内容没变就不写，返回 0（而不是把入参条数当写入条数）
+    assert store.seed_questions([question]) == 0
     assert store.get_question(question.id) == question
+
+    # 内容变了才重写
+    changed = question.model_copy(update={"answer": "C"})
+    assert store.seed_questions([changed]) == 1
+    assert store.get_question(question.id).answer == "C"
     assert store.list_questions(knowledge_id="linear_eq", grade=7)[0].id == question.id
     assert store.list_questions(knowledge_id="missing") == []
     store.close()

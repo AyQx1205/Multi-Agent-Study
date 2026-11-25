@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable
 
@@ -60,10 +60,30 @@ class LearnerEngagement:
         window = self.recent_response_times[-10:]
         return sum(window) / len(window) if window else 0.0
 
+    def start_new_session(self, now: datetime | None = None) -> None:
+        """开一段新会话：重置会话计时和会话内统计。
+
+        `session_start` 如果只在对象创建时设置一次，进程跑满 45 分钟后，
+        该学生**下一题**就会被判成「疲劳」——这是错误的。
+        """
+        self.session_start = ensure_utc(now) or utcnow()
+        self.recent_results.clear()
+        self.recent_response_times.clear()
+        self.consecutive_errors = 0
+        self.consecutive_correct = 0
+        self.encouragement_count = 0
+
 
 class EngagementAgent(BaseAgent):
-    def __init__(self, *args: Any, clock: Callable[[], datetime] | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        clock: Callable[[], datetime] | None = None,
+        session_gap_seconds: int = 1800,
+        **kwargs: Any,
+    ) -> None:
         self._clock = clock or utcnow
+        self._session_gap_seconds = max(60, session_gap_seconds)
         self._engagements: dict[str, LearnerEngagement] = {}
         super().__init__(*args, **kwargs)
 
@@ -93,7 +113,14 @@ class EngagementAgent(BaseAgent):
         is_correct = bool(event.data.get("is_correct", False))
         time_spent = float(event.data.get("time_spent_seconds", 0) or 0)
 
-        eng.last_activity = ensure_utc(self._clock()) or utcnow()
+        now = ensure_utc(self._clock()) or utcnow()
+        last = ensure_utc(eng.last_activity)
+        if last is not None and (now - last) > timedelta(
+            seconds=self._session_gap_seconds
+        ):
+            # 间隔够久，视为新一次学习会话，不要把上次的时长算进来。
+            eng.start_new_session(now)
+        eng.last_activity = now
         eng.total_interactions += 1
         eng.recent_results.append(is_correct)
         if time_spent > 0:

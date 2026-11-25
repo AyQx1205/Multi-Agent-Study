@@ -181,6 +181,23 @@ CREATE INDEX IF NOT EXISTS idx_audit_org_created ON audit_logs(org_id, created_a
 """
 
 
+def _question_signature(question: Question) -> tuple:
+    """题目的内容指纹：只有这些字段变了才需要重写题库。"""
+    return (
+        question.knowledge_id,
+        question.grade,
+        question.type.value,
+        question.stem,
+        json.dumps(question.options, ensure_ascii=False),
+        question.answer,
+        json.dumps(question.accepted, ensure_ascii=False),
+        question.explanation,
+        question.difficulty,
+        question.source,
+        question.version,
+    )
+
+
 class SqliteStore:
     def __init__(
         self, path: str | Path = "knowledge.db", *, apply_schema: bool = True
@@ -886,44 +903,72 @@ class SqliteStore:
 
     # ── 题库与答题记录 ──
     def seed_questions(self, questions: list[Question]) -> int:
-        """幂等导入种子题库；内容更新时覆盖同 ID 的题。"""
-        for question in questions:
-            self.conn.execute(
-                """
-                INSERT INTO questions
-                    (id, knowledge_id, grade, type, stem, options, answer,
-                     accepted, explanation, difficulty, source, version)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    knowledge_id=excluded.knowledge_id,
-                    grade=excluded.grade,
-                    type=excluded.type,
-                    stem=excluded.stem,
-                    options=excluded.options,
-                    answer=excluded.answer,
-                    accepted=excluded.accepted,
-                    explanation=excluded.explanation,
-                    difficulty=excluded.difficulty,
-                    source=excluded.source,
-                    version=excluded.version
-                """,
-                (
-                    question.id,
-                    question.knowledge_id,
-                    question.grade,
-                    question.type.value,
-                    question.stem,
-                    json.dumps(question.options, ensure_ascii=False),
-                    question.answer,
-                    json.dumps(question.accepted, ensure_ascii=False),
-                    question.explanation,
-                    question.difficulty,
-                    question.source,
-                    question.version,
-                ),
-            )
-        self.conn.commit()
-        return len(questions)
+        """幂等导入种子题库，只写**内容有变化**的题；返回实际写入条数。
+
+        之前每次启动都无条件 upsert 全部题目，还把「入参条数」当成写入条数
+        返回，日志里永远是「seeded 180」，看不出到底有没有变化。
+        """
+        changed = 0
+        with self.conn:
+            existing = {
+                row["id"]: self._question_signature_from_row(row)
+                for row in self.conn.execute("SELECT * FROM questions")
+            }
+            for question in questions:
+                if existing.get(question.id) == _question_signature(question):
+                    continue
+                self.conn.execute(
+                    """
+                    INSERT INTO questions
+                        (id, knowledge_id, grade, type, stem, options, answer,
+                         accepted, explanation, difficulty, source, version)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        knowledge_id=excluded.knowledge_id,
+                        grade=excluded.grade,
+                        type=excluded.type,
+                        stem=excluded.stem,
+                        options=excluded.options,
+                        answer=excluded.answer,
+                        accepted=excluded.accepted,
+                        explanation=excluded.explanation,
+                        difficulty=excluded.difficulty,
+                        source=excluded.source,
+                        version=excluded.version
+                    """,
+                    (
+                        question.id,
+                        question.knowledge_id,
+                        question.grade,
+                        question.type.value,
+                        question.stem,
+                        json.dumps(question.options, ensure_ascii=False),
+                        question.answer,
+                        json.dumps(question.accepted, ensure_ascii=False),
+                        question.explanation,
+                        question.difficulty,
+                        question.source,
+                        question.version,
+                    ),
+                )
+                changed += 1
+        return changed
+
+    @staticmethod
+    def _question_signature_from_row(row: sqlite3.Row) -> tuple:
+        return (
+            row["knowledge_id"],
+            row["grade"],
+            row["type"],
+            row["stem"],
+            row["options"],
+            row["answer"],
+            row["accepted"],
+            row["explanation"],
+            row["difficulty"],
+            row["source"],
+            row["version"],
+        )
 
     def _question_from_row(self, row: sqlite3.Row) -> Question:
         return Question(

@@ -10,7 +10,10 @@ from app.core.timeutil import ensure_utc, utcnow
 logger = logging.getLogger(__name__)
 
 MIN_EF = 1.3
-MAX_EF = 2.5
+# 之前这里是 2.5，正好等于 ReviewItem 的初始 EF，于是 EF 只能降不能升：
+# 答得再顺，间隔增长系数也永远是 2.5×。SM-2 本身对 EF 没有上限，
+# 这里给 3.0 作为工程上限，防止间隔无限拉长。
+MAX_EF = 3.0
 
 class ReviewItem(BaseModel):
     knowledge_id: str = Field(description="复习知识点id")

@@ -91,6 +91,8 @@ class Settings:
     hint_after_attempts: int = 2
     # 答错后要答几次才揭示标准答案：防止「乱答一次换答案」再重交刷掌握度。
     answer_reveal_after_attempts: int = 2
+    # 距上次活动超过这么久，就视为新一次学习会话（重置会话时长/疲劳判断）。
+    engagement_session_gap_minutes: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -138,6 +140,7 @@ class Settings:
             weakness_threshold=_env_float("WEAKNESS_THRESHOLD", 0.3),
             hint_after_attempts=_env_int("HINT_AFTER_ATTEMPTS", 2),
             answer_reveal_after_attempts=_env_int("ANSWER_REVEAL_AFTER_ATTEMPTS", 2),
+            engagement_session_gap_minutes=_env_int("ENGAGEMENT_SESSION_GAP_MINUTES", 30),
         )
 
 
