@@ -146,6 +146,10 @@ class Store(Protocol):
 
     async def has_active_session(self, user_id: str, now: Any) -> bool: ...
 
+    async def purge_expired(self, now: Any, throttle_before: Any) -> dict[str, int]: ...
+
+    async def purge_history(self, before: Any) -> dict[str, int]: ...
+
     async def create_ws_ticket(
         self,
         ticket_hash: str,
@@ -418,6 +422,12 @@ class SqliteStoreAdapter:
 
     async def has_active_session(self, user_id: str, now: Any) -> bool:
         return await self._call(self._inner.has_active_session, user_id, now)
+
+    async def purge_expired(self, now: Any, throttle_before: Any) -> dict[str, int]:
+        return await self._call(self._inner.purge_expired, now, throttle_before)
+
+    async def purge_history(self, before: Any) -> dict[str, int]:
+        return await self._call(self._inner.purge_history, before)
 
     async def create_ws_ticket(
         self,

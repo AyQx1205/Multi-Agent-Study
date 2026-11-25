@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from app.agents.base import BaseAgent
+from app.core.cache import BoundedCache
 from app.core.events import Event, EventType
 from app.llm.client import LLMClient, guard_response
 
@@ -37,13 +38,14 @@ class TutorAgent(BaseAgent):
         hint_after_attempts: int = HINT_AFTER_ATTEMPTS,
         llm_timeout: float = 8.0,
         llm_for_answers: bool = False,
+        cache_size: int = 5000,
         **kwargs: Any,
     ) -> None:
         self._llm = llm
         self._hint_after_attempts = hint_after_attempts
         self._llm_timeout = llm_timeout
         self._llm_for_answers = llm_for_answers
-        self._attempts: dict[str, int] = {}
+        self._attempts: dict[str, int] = BoundedCache(cache_size, name="tutor_attempts")
         super().__init__(*args, **kwargs)
 
     @property

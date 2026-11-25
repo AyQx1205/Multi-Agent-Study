@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from app.agents.base import BaseAgent
+from app.core.cache import BoundedCache
 from app.core.events import Event, EventType
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,10 @@ HINT_TEMPLATES: dict[int, dict[str, Any]] = {
 }
 
 class HintAgent(BaseAgent):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._hint_history: dict[str, int] = {}
+    def __init__(self, *args: Any, cache_size: int = 5000, **kwargs: Any) -> None:
+        self._hint_history: dict[str, int] = BoundedCache(
+            cache_size, name="hint_history"
+        )
         super().__init__(*args, **kwargs)
 
     @property

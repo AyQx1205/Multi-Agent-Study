@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from app.agents.base import BaseAgent
+from app.core.cache import BoundedCache
 from app.core.events import Event, EventType
 from app.core.timeutil import ensure_utc, utcnow
 
@@ -80,11 +81,14 @@ class EngagementAgent(BaseAgent):
         *args: Any,
         clock: Callable[[], datetime] | None = None,
         session_gap_seconds: int = 1800,
+        cache_size: int = 5000,
         **kwargs: Any,
     ) -> None:
         self._clock = clock or utcnow
         self._session_gap_seconds = max(60, session_gap_seconds)
-        self._engagements: dict[str, LearnerEngagement] = {}
+        self._engagements: dict[str, LearnerEngagement] = BoundedCache(
+            cache_size, name="engagement"
+        )
         super().__init__(*args, **kwargs)
 
     @property

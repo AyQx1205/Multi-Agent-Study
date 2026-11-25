@@ -4,12 +4,14 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import ensure_learner_access, get_principal, require_roles
 from app.config import get_settings
 from app.content import content_summary
 from app.core.accounts import Principal, Role
+from app.metrics import metrics
 from app.orchestrator import (
     IdempotencyConflictError,
     QuestionNotFoundError,
@@ -28,6 +30,7 @@ def _enforce_rate_limit(request: Request, bucket: str, user_id: str, limit: int)
         return
     wait = limiter.hit(f"{bucket}:{user_id}", limit)
     if wait is not None:
+        metrics.inc("rate_limited_total", bucket=bucket, channel="http")
         raise HTTPException(
             status_code=429,
             detail="rate limit exceeded",
@@ -82,6 +85,12 @@ async def health_check(request: Request) -> dict[str, Any]:
 async def liveness() -> dict[str, str]:
     """进程存活探针：不查数据库，避免数据库抖动导致容器被误杀。"""
     return {"status": "ok"}
+
+
+@router.get("/metrics")
+async def metrics_endpoint() -> PlainTextResponse:
+    """Prometheus 文本格式指标；内网抓取，勿暴露到公网。"""
+    return PlainTextResponse(metrics.render())
 
 
 @router.get("/ready")

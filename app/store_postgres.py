@@ -213,6 +213,14 @@ def advisory_key(learner_id: str) -> int:
 BOOTSTRAP_LOCK_KEY = 20261029
 
 
+def _rowcount(status: str) -> int:
+    """把 asyncpg 的 'DELETE 3' 转成数字。"""
+    try:
+        return int(str(status).split()[-1])
+    except (ValueError, IndexError):  # pragma: no cover - 防御性
+        return 0
+
+
 class PostgresStore:
     name = "postgres"
 
@@ -948,6 +956,55 @@ class PostgresStore:
                 _utc(now),
             )
         return bool(row)
+
+    async def purge_expired(
+        self, now: datetime, throttle_before: datetime
+    ) -> dict[str, int]:
+        """删除过期/已撤销的会话、已用/过期的 WS ticket、失效的登录限流记录。"""
+        current = _utc(now)
+        stale = _utc(throttle_before)
+        counts: dict[str, int] = {}
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    """
+                    DELETE FROM auth_sessions
+                    WHERE expires_at <= $1
+                       OR (revoked_at IS NOT NULL AND revoked_at <= $1)
+                    """,
+                    current,
+                )
+                counts["auth_sessions"] = _rowcount(status)
+                status = await conn.execute(
+                    "DELETE FROM ws_tickets WHERE used_at IS NOT NULL OR expires_at <= $1",
+                    current,
+                )
+                counts["ws_tickets"] = _rowcount(status)
+                status = await conn.execute(
+                    """
+                    DELETE FROM login_throttle
+                    WHERE window_start <= $1
+                      AND (locked_until IS NULL OR locked_until <= $2)
+                    """,
+                    stale,
+                    current,
+                )
+                counts["login_throttle"] = _rowcount(status)
+        return counts
+
+    async def purge_history(self, before: datetime) -> dict[str, int]:
+        """按留存策略删除历史事件与答题记录（默认不启用）。"""
+        cutoff = _utc(before)
+        counts: dict[str, int] = {}
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute("DELETE FROM events WHERE timestamp < $1", cutoff)
+                counts["events"] = _rowcount(status)
+                status = await conn.execute(
+                    "DELETE FROM attempts WHERE created_at < $1", cutoff
+                )
+                counts["attempts"] = _rowcount(status)
+        return counts
 
     # ── WebSocket 一次性 ticket ──
     async def create_ws_ticket(

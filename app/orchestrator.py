@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from app.agents import AssessmentAgent, CurriculumAgent,EngagementAgent,HintAgent,TutorAgent
 from app.config import Settings, get_settings
+from app.core.cache import BoundedCache, LockCache
 from app.core.content import Attempt, Question
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType,EventBus
@@ -18,6 +19,7 @@ from app.core.knowledge_graph import KnowledgeGraph
 from app.core.learner_model import LearnerModel
 from app.core.spaced_repetition import ReviewItem
 from app.llm.client import LLMClient
+from app.metrics import metrics
 from app.store_base import Store
 
 logger = logging.getLogger(__name__)
@@ -59,9 +61,16 @@ class AgentOrchestrator:
         正式应用在 lifespan 里传入 `build_junior_math_graph()`。"""
         self.settings = settings or get_settings()
         self.store = store
-        self._locks: dict[str, asyncio.Lock] = {}
+        # 有界：长期运行不会因为「每个学生一份模型 / 一把锁」而无限涨内存。
+        # 冷数据被淘汰后从 store 重新加载即可（数据库才是真相源）。
+        self._locks: dict[str, asyncio.Lock] = LockCache(
+            self.settings.learner_cache_size, name="learner_locks"
+        )
         self.event_bus = EventBus()
-        self.learner_models: dict[str,LearnerModel] = {}
+        self.learner_models: dict[str,LearnerModel] = BoundedCache(
+            self.settings.learner_cache_size, name="learner_models"
+        )
+        state_size = self.settings.agent_state_cache_size
         # 提交事务期间，该学习者的事件先留在内存，由事务统一落库。
         self._submission_cid: dict[str, str] = {}
         # 提交期间产生的非本次事件（如 idle watcher），提交后补写。
@@ -84,6 +93,7 @@ class AgentOrchestrator:
             hint_after_attempts=self.settings.hint_after_attempts,
             llm_timeout=self.settings.llm_timeout_seconds,
             llm_for_answers=self.settings.tutor_llm_for_answers,
+            cache_size=state_size,
         )
         self.curriculum = CurriculumAgent(
             "CurriculumAgent",
@@ -92,19 +102,27 @@ class AgentOrchestrator:
             clock=clock,
             graph=graph,
             mastery_threshold=self.settings.mastery_threshold,
+            cache_size=state_size,
         )
-        self.hint = HintAgent("HintAgent", self.event_bus, self.learner_models)
+        self.hint = HintAgent(
+            "HintAgent", self.event_bus, self.learner_models, cache_size=state_size
+        )
         self.engagement = EngagementAgent(
             "EngagementAgent",
             self.event_bus,
             self.learner_models,
             clock=clock,
             session_gap_seconds=self.settings.engagement_session_gap_minutes * 60,
+            cache_size=state_size,
         )
 
     # ── 持久化：加载 / 保存 / 事件落库 ──
     def _lock(self, learner_id: str) -> asyncio.Lock:
-        """单进程内串行化同一 learner；跨进程/多实例由存储层 learner 锁兜底。"""
+        """单进程内串行化同一 learner；跨进程/多实例由存储层 learner 锁兜底。
+
+        `LockCache` 只淘汰未被持有的锁：事件循环单线程，`_lock()` 返回后会立刻
+        进入 `async with`，中间没有让出点，所以不会出现「同一学习者两把锁」。
+        """
         return self._locks.setdefault(learner_id, asyncio.Lock())
 
     async def _publish_and_collect(
@@ -329,6 +347,8 @@ class AgentOrchestrator:
                 events = [*events, enriched]
 
         reveal_answer = attempt.is_correct or attempts_for_question >= reveal_after
+        metrics.inc("submissions_total", result="replayed" if replayed else "issued")
+        metrics.inc("submission_mastery_counted_total", counted=str(counts_toward_mastery))
         return SubmissionOutcome(
             events=events,
             attempt=attempt,

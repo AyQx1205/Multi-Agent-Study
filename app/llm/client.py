@@ -10,6 +10,8 @@ try:  # httpx 只在真实模型模式下需要；缺了也不影响 Mock 与测
 except Exception:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
 
+from app.metrics import metrics
+
 logger = logging.getLogger(__name__)
 
 BANNED_PATTERNS = [
@@ -45,7 +47,9 @@ class MockLLM:
             await asyncio.sleep(self.delay)
         if self.fail_times > 0:
             self.fail_times -= 1
+            metrics.inc("llm_calls_total", result="error", model="mock")
             raise RuntimeError("mock llm failure")
+        metrics.inc("llm_calls_total", result="ok", model="mock")
         return "先别急着算。你觉得题目里哪个条件最关键？"
 
 
@@ -147,8 +151,10 @@ class OpenAICompatibleLLM:
                 usage.get("prompt_tokens"),
                 usage.get("completion_tokens"),
             )
+            metrics.inc("llm_calls_total", result="ok", model=self.model)
             return (content or "").strip()
 
+        metrics.inc("llm_calls_total", result="error", model=self.model)
         raise RuntimeError(
             f"llm request failed after {self.max_retries + 1} attempts"
         ) from last_error

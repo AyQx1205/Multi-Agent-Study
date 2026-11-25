@@ -298,6 +298,7 @@ python scripts\ws_client.py `
 | GET | `/health` | 公开健康检查（进程/内容，不查库） |
 | GET | `/live` | 存活探针（不查库） |
 | GET | `/ready` | 就绪探针（数据库与核心表可用返回 200，否则 503） |
+| GET | `/metrics` | Prometheus 文本指标 |
 | POST | `/auth/bootstrap` | 首次创建学校+管理员 |
 | POST | `/auth/login` | 登录 |
 | POST | `/auth/logout` | 撤销当前会话 |
@@ -353,7 +354,38 @@ alembic upgrade head
 
 已有旧库也支持升级：`0001` 使用 `CREATE TABLE IF NOT EXISTS` 兼容存量表，`0002` 用 inspector 判断后再补幂等列，`0003` 新增 `ws_tickets`、`login_throttle`、`audit_logs`。当前 head 是 `0003_security_hardening`。
 
-## 7. 测试
+## 7. 运维与可观测性
+
+### 指标
+
+`GET /metrics` 暴露 Prometheus 文本格式（内网抓取，不要暴露到公网）：
+
+| 指标 | 含义 |
+|---|---|
+| `events_published_total{type}` | 各类型事件发布数 |
+| `events_dropped_total{reason,type}` | 因深度上限被丢弃的事件（正常应恒为 0） |
+| `submissions_total{result}` | 提交次数（`issued` / `replayed`） |
+| `rate_limited_total{bucket,channel}` | 被限流的请求 |
+| `llm_calls_total{result,model}` | LLM 调用成功 / 失败 |
+| `cache_evictions_total{cache}` | 内存缓存淘汰次数 |
+| `ws_connections` / `ws_learners` | 在线连接数 / 在线学习者数 |
+| `purged_rows_total{kind}` | 维护任务清理的行数 |
+
+### 后台维护
+
+每 `MAINTENANCE_INTERVAL_SECONDS`（默认 300 秒）跑一轮：
+
+- 给所有 WebSocket 连接发心跳，发失败的连接就地回收；
+- 关闭超过 `WS_IDLE_TIMEOUT_SECONDS` 没有消息的连接；
+- 清理过期/已撤销的 `auth_sessions`、已用/过期的 `ws_tickets`、失效的 `login_throttle`。
+
+学习记录默认**不删**。要启用留存策略，设置 `EVENTS_RETENTION_DAYS` / `ATTEMPTS_RETENTION_DAYS`（天，`0` 表示永久保留）。
+
+### 内存
+
+学习者模型、学习者锁、各 Agent 的按人状态都是 **LRU 有界** 的（`LEARNER_CACHE_SIZE` / `AGENT_STATE_CACHE_SIZE`，默认 2000 / 5000），冷数据淘汰后从数据库重新加载。锁缓存只淘汰**未被持有**的锁，不会破坏互斥。
+
+## 8. 测试
 
 ```powershell
 # 全量（PostgreSQL 测试默认跳过）
@@ -378,7 +410,7 @@ pytest tests/test_store_postgres.py -q
 - Alembic 空库升级 + 旧 `attempts` 表升级；
 - SQLite/PostgreSQL 存储层 roundtrip。
 
-## 8. 还没做的生产项
+## 9. 还没做的生产项
 
 - 密码强度策略、密码重置/找回；
 - HttpOnly Cookie / OIDC 接入；

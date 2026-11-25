@@ -14,11 +14,13 @@ from app.api.ws import ws_router
 from app.config import Settings, get_settings
 from app.content import build_junior_math_graph, build_junior_math_questions
 from app.llm.client import MockLLM, OpenAICompatibleLLM
+from app.maintenance import maintenance_loop
 from app.orchestrator import AgentOrchestrator
 from app.rate_limit import SlidingWindowLimiter
 from app.store import SqliteStore
 from app.store_base import SqliteStoreAdapter
 from app.store_postgres import PostgresStore
+from app.ws_manager import manager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -95,13 +97,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         graph=graph,
     )
     watcher = asyncio.create_task(app.state.orchestrator.engagement.start_idle_watcher())
+    maintenance = asyncio.create_task(
+        maintenance_loop(store, settings, manager)
+    )
     logger.info("orchestrator ready (llm=%s)", "mock" if isinstance(llm, MockLLM) else settings.llm_model)
     try:
         yield
     finally:
         watcher.cancel()
+        maintenance.cancel()
         with suppress(asyncio.CancelledError):
             await watcher
+        with suppress(asyncio.CancelledError):
+            await maintenance
         if hasattr(llm, "aclose"):
             await llm.aclose()
         await store.close()

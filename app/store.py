@@ -610,6 +610,67 @@ class SqliteStore:
                 return True
         return False
 
+    # ── 过期数据清理 ──
+    def purge_expired(
+        self, now: datetime, throttle_before: datetime
+    ) -> dict[str, int]:
+        """删除过期/已撤销的会话、已用/过期的 WS ticket、失效的登录限流记录。
+
+        只删「确定已经没用」的行：学习记录（events/attempts）不在这里处理，
+        它们由 `purge_history` 按留存策略单独清理。
+        """
+        current = ensure_utc(now) or utcnow()
+        stale = ensure_utc(throttle_before) or current
+        now_iso = current.isoformat()
+        stale_iso = stale.isoformat()
+        counts: dict[str, int] = {}
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM auth_sessions
+                WHERE datetime(expires_at) <= datetime(?)
+                   OR (revoked_at IS NOT NULL AND datetime(revoked_at) <= datetime(?))
+                """,
+                (now_iso, now_iso),
+            )
+            counts["auth_sessions"] = cursor.rowcount
+            cursor = self.conn.execute(
+                """
+                DELETE FROM ws_tickets
+                WHERE used_at IS NOT NULL OR datetime(expires_at) <= datetime(?)
+                """,
+                (now_iso,),
+            )
+            counts["ws_tickets"] = cursor.rowcount
+            cursor = self.conn.execute(
+                """
+                DELETE FROM login_throttle
+                WHERE datetime(window_start) <= datetime(?)
+                  AND (locked_until IS NULL OR datetime(locked_until) <= datetime(?))
+                """,
+                (stale_iso, now_iso),
+            )
+            counts["login_throttle"] = cursor.rowcount
+        return counts
+
+    def purge_history(self, before: datetime) -> dict[str, int]:
+        """按留存策略删除历史事件与答题记录（默认不启用）。"""
+        cutoff = ensure_utc(before) or utcnow()
+        cutoff_iso = cutoff.isoformat()
+        counts: dict[str, int] = {}
+        with self.conn:
+            cursor = self.conn.execute(
+                "DELETE FROM events WHERE datetime(timestamp) < datetime(?)",
+                (cutoff_iso,),
+            )
+            counts["events"] = cursor.rowcount
+            cursor = self.conn.execute(
+                "DELETE FROM attempts WHERE datetime(created_at) < datetime(?)",
+                (cutoff_iso,),
+            )
+            counts["attempts"] = cursor.rowcount
+        return counts
+
     # ── WebSocket 一次性 ticket ──
     def create_ws_ticket(
         self,

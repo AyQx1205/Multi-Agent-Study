@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
 from app.core.accounts import Role, User
+from app.metrics import metrics
 from app.orchestrator import IdempotencyConflictError, QuestionNotFoundError
 from app.security import hash_session_token
 from app.ws_manager import manager
@@ -76,7 +77,10 @@ def _check_rate(websocket: WebSocket, user_id: str, bucket: str, limit: int) -> 
     limiter = getattr(websocket.app.state, "rate_limiter", None)
     if limiter is None:
         return True
-    return limiter.hit(f"{bucket}:{user_id}", limit) is None
+    allowed = limiter.hit(f"{bucket}:{user_id}", limit) is None
+    if not allowed:
+        metrics.inc("rate_limited_total", bucket=bucket, channel="ws")
+    return allowed
 
 
 @ws_router.websocket("/ws/{learner_id}")
@@ -85,13 +89,20 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
     if user is None:
         return
 
-    await manager.connect(learner_id, websocket)
     settings = get_settings()
+    connected = await manager.connect(
+        learner_id,
+        websocket,
+        max_connections=settings.ws_max_connections_per_learner,
+    )
+    if not connected:
+        return
     max_frame = max(512, settings.ws_max_message_chars)
     store = websocket.app.state.orchestrator.store
     try:
         while True:
             raw = await websocket.receive_text()
+            manager.touch(learner_id, websocket)
             if len(raw) > max_frame:
                 await manager.send(
                     learner_id,

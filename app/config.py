@@ -94,6 +94,21 @@ class Settings:
     # 距上次活动超过这么久，就视为新一次学习会话（重置会话时长/疲劳判断）。
     engagement_session_gap_minutes: int = 30
 
+    # 内存淘汰：学习者模型与 Agent 内部状态的 LRU 上限（冷数据回落到数据库）
+    learner_cache_size: int = 2000
+    agent_state_cache_size: int = 5000
+
+    # WebSocket 运维参数
+    ws_max_connections_per_learner: int = 5
+    ws_heartbeat_seconds: int = 25
+    ws_idle_timeout_seconds: int = 300
+
+    # 后台维护：清理过期会话/ticket/限流记录
+    maintenance_interval_seconds: int = 300
+    # 学习记录留存（天）；0 表示永久保留，不自动删
+    events_retention_days: int = 0
+    attempts_retention_days: int = 0
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -141,6 +156,14 @@ class Settings:
             hint_after_attempts=_env_int("HINT_AFTER_ATTEMPTS", 2),
             answer_reveal_after_attempts=_env_int("ANSWER_REVEAL_AFTER_ATTEMPTS", 2),
             engagement_session_gap_minutes=_env_int("ENGAGEMENT_SESSION_GAP_MINUTES", 30),
+            learner_cache_size=_env_int("LEARNER_CACHE_SIZE", 2000),
+            agent_state_cache_size=_env_int("AGENT_STATE_CACHE_SIZE", 5000),
+            ws_max_connections_per_learner=_env_int("WS_MAX_CONNECTIONS_PER_LEARNER", 5),
+            ws_heartbeat_seconds=_env_int("WS_HEARTBEAT_SECONDS", 25),
+            ws_idle_timeout_seconds=_env_int("WS_IDLE_TIMEOUT_SECONDS", 300),
+            maintenance_interval_seconds=_env_int("MAINTENANCE_INTERVAL_SECONDS", 300),
+            events_retention_days=_env_int("EVENTS_RETENTION_DAYS", 0),
+            attempts_retention_days=_env_int("ATTEMPTS_RETENTION_DAYS", 0),
         )
 
 

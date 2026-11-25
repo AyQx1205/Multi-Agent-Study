@@ -11,6 +11,7 @@ from typing import Any,Awaitable,Callable
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.timeutil import ensure_utc, utcnow
+from app.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +116,14 @@ class EventBus:
                 event.type.value,
                 event.source,
             )
+            metrics.inc("events_dropped_total", reason="depth_limit", type=event.type.value)
             return
 
         async with self._lock:
             self._history.append(event)
             if len(self._history) > HISTORY_LIMIT:
                 del self._history[:len(self._history) - HISTORY_LIMIT]
+        metrics.inc("events_published_total", type=event.type.value)
 
         handlers = list(self._subscribers.get(event.type, [])) + list(self._all_handlers)
         if not handlers:

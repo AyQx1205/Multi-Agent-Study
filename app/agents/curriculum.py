@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from app.agents.base import BaseAgent
+from app.core.cache import BoundedCache
 from app.core.events import Event, EventType
 from app.core.knowledge_graph import KnowledgeGraph, build_sample_math_graph
 from app.core.spaced_repetition import ReviewItem, SpacedRepetition
@@ -23,14 +24,19 @@ class CurriculumAgent(BaseAgent):
         sr: SpacedRepetition | None = None,
         clock: Callable[[], datetime] | None = None,
         mastery_threshold: float = MASTERY_THRESHOLD,
+        cache_size: int = 5000,
         **kwargs: Any,
     ) -> None:
         self.knowledge_graph = graph or build_sample_math_graph()
         self.sr = sr or SpacedRepetition()
         self._clock = clock or utcnow
         self._mastery_threshold = mastery_threshold
-        self._reviews: dict[str, dict[str, ReviewItem]] = {}
-        self._recommended: dict[str, str] = {}
+        self._reviews: dict[str, dict[str, ReviewItem]] = BoundedCache(
+            cache_size, name="curriculum_reviews"
+        )
+        self._recommended: dict[str, str] = BoundedCache(
+            cache_size, name="curriculum_recommended"
+        )
         super().__init__(*args, **kwargs)
 
     # ── 复习状态的持久化入口（由 orchestrator 调用） ──
