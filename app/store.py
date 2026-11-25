@@ -13,15 +13,16 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from app.core.accounts import Classroom, Organization, Role, SessionRecord, User
+from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
 from app.core.content import Attempt, Question, QuestionType
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
 from app.core.spaced_repetition import ReviewItem
+from app.core.timeutil import parse_iso_utc, utcnow
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS learners (
@@ -147,6 +148,36 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    used_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ws_tickets_user ON ws_tickets(user_id);
+
+CREATE TABLE IF NOT EXISTS login_throttle (
+    throttle_key TEXT PRIMARY KEY,
+    failures     INTEGER NOT NULL DEFAULT 0,
+    window_start TEXT NOT NULL,
+    locked_until TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT,
+    actor_user_id TEXT,
+    action        TEXT NOT NULL,
+    target_type   TEXT,
+    target_id     TEXT,
+    ip            TEXT,
+    user_agent    TEXT,
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org_created ON audit_logs(org_id, created_at);
 """
 
 
@@ -184,11 +215,17 @@ class SqliteStore:
         self.conn.close()
 
     def healthcheck(self) -> bool:
+        required = ("attempts", "ws_tickets", "login_throttle", "audit_logs")
         try:
+            placeholders = ",".join("?" for _ in required)
             row = self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempts'"
+                f"""
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type='table' AND name IN ({placeholders})
+                """,
+                required,
             ).fetchone()
-            return bool(row and row[0] == 1)
+            return bool(row and row[0] == len(required))
         except Exception:
             return False
 
@@ -199,7 +236,7 @@ class SqliteStore:
             id=row["id"],
             name=row["name"],
             slug=row["slug"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+            created_at=parse_iso_utc(row["created_at"]),
         )
 
     @staticmethod
@@ -211,7 +248,7 @@ class SqliteStore:
             display_name=row["display_name"],
             role=Role(row["role"]),
             is_active=bool(row["is_active"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
+            created_at=parse_iso_utc(row["created_at"]),
         )
 
     @staticmethod
@@ -222,7 +259,7 @@ class SqliteStore:
             name=row["name"],
             code=row["code"],
             teacher_id=row["teacher_id"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+            created_at=parse_iso_utc(row["created_at"]),
         )
 
     def count_users(self) -> int:
@@ -233,7 +270,7 @@ class SqliteStore:
             id=str(uuid.uuid4()),
             name=name,
             slug=slug,
-            created_at=datetime.now(),
+            created_at=utcnow(),
         )
         try:
             self.conn.execute(
@@ -271,7 +308,7 @@ class SqliteStore:
             email=email.lower().strip(),
             display_name=display_name,
             role=role,
-            created_at=datetime.now(),
+            created_at=utcnow(),
         )
         try:
             self.conn.execute(
@@ -331,7 +368,7 @@ class SqliteStore:
             name=name,
             code=code.strip().upper(),
             teacher_id=teacher_id,
-            created_at=datetime.now(),
+            created_at=utcnow(),
         )
         try:
             self.conn.execute(
@@ -391,7 +428,7 @@ class SqliteStore:
     def add_enrollment(self, class_id: str, user_id: str) -> None:
         self.conn.execute(
             "INSERT OR IGNORE INTO enrollments(class_id, user_id, created_at) VALUES (?,?,?)",
-            (class_id, user_id, datetime.now().isoformat()),
+            (class_id, user_id, utcnow().isoformat()),
         )
         self.conn.commit()
 
@@ -454,23 +491,169 @@ class SqliteStore:
         return SessionRecord(
             token_hash=row["token_hash"],
             user_id=row["user_id"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            expires_at=datetime.fromisoformat(row["expires_at"]),
-            revoked_at=(
-                datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None
-            ),
+            created_at=parse_iso_utc(row["created_at"]),
+            expires_at=parse_iso_utc(row["expires_at"]),
+            revoked_at=parse_iso_utc(row["revoked_at"]),
         )
 
     def revoke_session(self, token_hash: str) -> None:
         self.conn.execute(
             "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=?",
-            (datetime.now().isoformat(), token_hash),
+            (utcnow().isoformat(), token_hash),
         )
         self.conn.commit()
 
+    # ── WebSocket 一次性 ticket ──
+    def create_ws_ticket(
+        self,
+        ticket_hash: str,
+        user_id: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO ws_tickets(ticket_hash, user_id, created_at, expires_at)
+            VALUES (?,?,?,?)
+            """,
+            (ticket_hash, user_id, created_at.isoformat(), expires_at.isoformat()),
+        )
+        self.conn.commit()
+
+    def consume_ws_ticket(self, ticket_hash: str, now: datetime) -> str | None:
+        row = self.conn.execute(
+            "SELECT * FROM ws_tickets WHERE ticket_hash=?", (ticket_hash,)
+        ).fetchone()
+        if row is None or row["used_at"] is not None:
+            return None
+        expires_at = parse_iso_utc(row["expires_at"])
+        if expires_at is None:
+            return None
+        if expires_at <= now:
+            return None
+        self.conn.execute(
+            "UPDATE ws_tickets SET used_at=? WHERE ticket_hash=?",
+            (now.isoformat(), ticket_hash),
+        )
+        self.conn.commit()
+        return row["user_id"]
+
+    # ── 登录限流 ──
+    def login_locked_until(self, throttle_key: str, now: datetime) -> datetime | None:
+        row = self.conn.execute(
+            "SELECT locked_until FROM login_throttle WHERE throttle_key=?",
+            (throttle_key,),
+        ).fetchone()
+        if row is None or row["locked_until"] is None:
+            return None
+        locked_until = parse_iso_utc(row["locked_until"])
+        if locked_until is None:
+            return None
+        return locked_until if locked_until > now else None
+
+    def record_login_failure(
+        self,
+        throttle_key: str,
+        now: datetime,
+        *,
+        window_seconds: int,
+        max_failures: int,
+        lock_seconds: int,
+    ) -> datetime | None:
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT * FROM login_throttle WHERE throttle_key=?",
+                (throttle_key,),
+            ).fetchone()
+            window_start = now
+            failures = 1
+            if row is not None:
+                previous = parse_iso_utc(row["window_start"]) or now
+                if previous > now - timedelta(seconds=window_seconds):
+                    window_start = previous
+                    failures = int(row["failures"]) + 1
+            locked_until = (
+                now + timedelta(seconds=lock_seconds)
+                if failures >= max_failures
+                else None
+            )
+            self.conn.execute(
+                """
+                INSERT INTO login_throttle(throttle_key, failures, window_start, locked_until)
+                VALUES (?,?,?,?)
+                ON CONFLICT(throttle_key) DO UPDATE SET
+                    failures=excluded.failures,
+                    window_start=excluded.window_start,
+                    locked_until=excluded.locked_until
+                """,
+                (
+                    throttle_key,
+                    failures,
+                    window_start.isoformat(),
+                    locked_until.isoformat() if locked_until else None,
+                ),
+            )
+        return locked_until
+
+    def reset_login_failures(self, throttle_key: str) -> None:
+        self.conn.execute(
+            "DELETE FROM login_throttle WHERE throttle_key=?", (throttle_key,)
+        )
+        self.conn.commit()
+
+    # ── 审计日志 ──
+    def append_audit_log(self, entry: AuditLogEntry) -> None:
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO audit_logs
+                (id, org_id, actor_user_id, action, target_type, target_id,
+                 ip, user_agent, metadata, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                entry.id,
+                entry.org_id,
+                entry.actor_user_id,
+                entry.action,
+                entry.target_type,
+                entry.target_id,
+                entry.ip,
+                entry.user_agent,
+                json.dumps(entry.metadata, ensure_ascii=False, default=str),
+                entry.created_at.isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def list_audit_logs(self, org_id: str, limit: int = 100) -> list[AuditLogEntry]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM audit_logs
+            WHERE org_id=?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (org_id, max(1, min(limit, 500))),
+        ).fetchall()
+        return [
+            AuditLogEntry(
+                id=row["id"],
+                org_id=row["org_id"],
+                actor_user_id=row["actor_user_id"],
+                action=row["action"],
+                target_type=row["target_type"],
+                target_id=row["target_id"],
+                ip=row["ip"],
+                user_agent=row["user_agent"],
+                metadata=json.loads(row["metadata"] or "{}"),
+                created_at=parse_iso_utc(row["created_at"]),
+            )
+            for row in rows
+        ]
+
     # ── 学习者 ──
     def _save_model_no_commit(self, model: LearnerModel) -> None:
-        now = datetime.now().isoformat()
+        now = utcnow().isoformat()
         self.conn.execute(
             "INSERT OR IGNORE INTO learners(learner_id, created_at, metadata) VALUES (?,?,?)",
             (model.learner_id, now, json.dumps(model.metadata)),
@@ -525,7 +708,7 @@ class SqliteStore:
                 attempts=state_row["attempts"],
                 correct_count=state_row["correct_count"],
                 streak=state_row["streak"],
-                last_attempt=datetime.fromisoformat(last_attempt) if last_attempt else None,
+                last_attempt=parse_iso_utc(last_attempt),
             )
         return model
 
@@ -571,8 +754,8 @@ class SqliteStore:
                 easiness_factor=row["easiness_factor"],
                 interval_days=row["interval_days"],
                 repetition=row["repetition"],
-                next_review=datetime.fromisoformat(row["next_review"]),
-                last_review=datetime.fromisoformat(last_review) if last_review else None,
+                next_review=parse_iso_utc(row["next_review"]) or utcnow(),
+                last_review=parse_iso_utc(last_review),
                 total_reviews=row["total_reviews"],
             )
         return result
@@ -732,7 +915,7 @@ class SqliteStore:
             answer=row["answer"],
             is_correct=bool(row["is_correct"]),
             time_spent_seconds=row["time_spent_seconds"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+            created_at=parse_iso_utc(row["created_at"]) or utcnow(),
             idempotency_key=row["idempotency_key"],
             request_fingerprint=row["request_fingerprint"],
         )
@@ -745,6 +928,15 @@ class SqliteStore:
             (learner_id, idempotency_key),
         ).fetchone()
         return self._attempt_from_row(row) if row else None
+
+    def count_question_attempts(self, learner_id: str, question_id: str) -> int:
+        """这道题此前被该学生提交过几次；用于判断是否首次作答。"""
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM attempts WHERE learner_id=? AND question_id=?",
+                (learner_id, question_id),
+            ).fetchone()["n"]
+        )
 
     def list_attempts(self, learner_id: str, limit: int = 50) -> list[Attempt]:
         rows = self.conn.execute(
@@ -884,7 +1076,7 @@ class SqliteStore:
                     source=row["source"],
                     learner_id=row["learner_id"],
                     correlation_id=row["correlation_id"],
-                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    timestamp=parse_iso_utc(row["timestamp"]) or utcnow(),
                     data=json.loads(row["data"]),
                 )
             )

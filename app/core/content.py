@@ -10,7 +10,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.timeutil import ensure_utc, utcnow
 
 
 class QuestionType(str, Enum):
@@ -53,6 +55,12 @@ class Attempt(BaseModel):
     answer: str
     is_correct: bool
     time_spent_seconds: float = 0.0
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @field_validator("created_at")
+    @classmethod
+    def _normalize_created_at(cls, value: datetime) -> datetime:
+        """入口统一成 aware UTC：naive 输入也按 UTC 解释。"""
+        return ensure_utc(value) or utcnow()
     idempotency_key: str | None = None
     request_fingerprint: str | None = None

@@ -51,9 +51,18 @@ def test_upgrade_fresh_database() -> None:
             }
             columns = {row[1] for row in conn.execute("PRAGMA table_info(attempts)")}
             version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert {"organizations", "users", "classes", "enrollments", "auth_sessions"} <= tables
+        assert {
+            "organizations",
+            "users",
+            "classes",
+            "enrollments",
+            "auth_sessions",
+            "ws_tickets",
+            "login_throttle",
+            "audit_logs",
+        } <= tables
         assert {"idempotency_key", "request_fingerprint"} <= columns
-        assert version == ("0002_auth_tenancy",)
+        assert version == ("0003_security_hardening",)
     finally:
         db.unlink(missing_ok=True)
 

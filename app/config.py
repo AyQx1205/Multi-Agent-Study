@@ -30,6 +30,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     # LLM
@@ -55,10 +62,29 @@ class Settings:
     # 平台运维令牌：用于创建新学校（多租户开通），未配置时该接口关闭
     platform_admin_token: str = ""
 
+    # 安全：CORS 白名单、登录限流、WebSocket 一次性 ticket
+    cors_origins: tuple[str, ...] = (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    )
+    login_max_failures: int = 5
+    login_ip_max_failures: int = 30
+    login_window_seconds: int = 900
+    login_lock_seconds: int = 900
+    ws_ticket_ttl_seconds: int = 30
+    # 仅用于兼容旧客户端；生产保持 false，WebSocket 必须使用 ticket。
+    ws_allow_query_token: bool = False
+
     # 教学策略
     mastery_threshold: float = 0.6
     weakness_threshold: float = 0.3
     hint_after_attempts: int = 2
+    # 答错后要答几次才揭示标准答案：防止「乱答一次换答案」再重交刷掌握度。
+    answer_reveal_after_attempts: int = 2
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -82,9 +108,27 @@ class Settings:
             auto_apply_schema=_env_bool("AUTO_APPLY_SCHEMA", True),
             session_ttl_hours=_env_int("SESSION_TTL_HOURS", 24),
             platform_admin_token=os.getenv("PLATFORM_ADMIN_TOKEN", "").strip(),
+            cors_origins=_env_csv(
+                "CORS_ORIGINS",
+                (
+                    "http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                    "http://localhost:5173",
+                    "http://127.0.0.1:5173",
+                    "http://localhost:8000",
+                    "http://127.0.0.1:8000",
+                ),
+            ),
+            login_max_failures=_env_int("LOGIN_MAX_FAILURES", 5),
+            login_ip_max_failures=_env_int("LOGIN_IP_MAX_FAILURES", 30),
+            login_window_seconds=_env_int("LOGIN_WINDOW_SECONDS", 900),
+            login_lock_seconds=_env_int("LOGIN_LOCK_SECONDS", 900),
+            ws_ticket_ttl_seconds=_env_int("WS_TICKET_TTL_SECONDS", 30),
+            ws_allow_query_token=_env_bool("WS_ALLOW_QUERY_TOKEN", False),
             mastery_threshold=_env_float("MASTERY_THRESHOLD", 0.6),
             weakness_threshold=_env_float("WEAKNESS_THRESHOLD", 0.3),
             hint_after_attempts=_env_int("HINT_AFTER_ATTEMPTS", 2),
+            answer_reveal_after_attempts=_env_int("ANSWER_REVEAL_AFTER_ATTEMPTS", 2),
         )
 
 

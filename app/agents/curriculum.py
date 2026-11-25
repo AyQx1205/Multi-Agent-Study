@@ -8,6 +8,7 @@ from app.agents.base import BaseAgent
 from app.core.events import Event, EventType
 from app.core.knowledge_graph import KnowledgeGraph, build_sample_math_graph
 from app.core.spaced_repetition import ReviewItem, SpacedRepetition
+from app.core.timeutil import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class CurriculumAgent(BaseAgent):
     ) -> None:
         self.knowledge_graph = graph or build_sample_math_graph()
         self.sr = sr or SpacedRepetition()
-        self._clock = clock or datetime.now
+        self._clock = clock or utcnow
         self._mastery_threshold = mastery_threshold
         self._reviews: dict[str, dict[str, ReviewItem]] = {}
         self._recommended: dict[str, str] = {}
@@ -84,14 +85,15 @@ class CurriculumAgent(BaseAgent):
 
     def _apply_review(self, learner_id: str, knowledge_id: str, quality: int) -> None:
         """同一天只排一次，避免一天 5 题把间隔推到 3 个月。"""
-        now = self._clock()
+        now = ensure_utc(self._clock()) or utcnow()
         items = self._reviews.setdefault(learner_id, {})
         item = items.get(knowledge_id)
         if item is None:
             item = ReviewItem(knowledge_id=knowledge_id, next_review=now)
             items[knowledge_id] = item
 
-        same_day = item.last_review is not None and item.last_review.date() == now.date()
+        last_review = ensure_utc(item.last_review)
+        same_day = last_review is not None and last_review.date() == now.date()
         if not same_day:
             self.sr.review(item, quality, now=now)
 
@@ -126,7 +128,7 @@ class CurriculumAgent(BaseAgent):
         )
 
     async def _send_schedule(self, learner_id: str, correlation_id: str | None) -> None:
-        now = self._clock()
+        now = ensure_utc(self._clock()) or utcnow()
         items = list(self._reviews.get(learner_id, {}).values())
         due = self.sr.get_due_items(items, now=now)
         schedule = self.sr.get_study_schedule(items, days_ahead=7, now=now)

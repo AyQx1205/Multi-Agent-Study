@@ -7,7 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.accounts import Role
+from app.config import get_settings
+from app.core.accounts import Role, User
 from app.orchestrator import IdempotencyConflictError, QuestionNotFoundError
 from app.security import hash_session_token
 
@@ -44,26 +45,9 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def _authenticate(websocket: WebSocket, learner_id: str) -> bool:
-    """WebSocket 用 ?token=... 认证；只允许学生连接自己的 learner_id。"""
-    token = websocket.query_params.get("token", "")
-    if not token:
-        await websocket.close(code=1008, reason="missing token")
-        return False
-
-    store = websocket.app.state.orchestrator.store
-    session = await store.get_session(hash_session_token(token))
-    if session is None or session.revoked_at is not None:
-        await websocket.close(code=1008, reason="invalid token")
-        return False
-    expires_at = session.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= datetime.now(timezone.utc):
-        await websocket.close(code=1008, reason="token expired")
-        return False
-
-    user = await store.get_user_by_id(session.user_id)
+async def _authorize_student(
+    websocket: WebSocket, user: User | None, learner_id: str
+) -> bool:
     if user is None or not user.is_active or user.role is not Role.STUDENT:
         await websocket.close(code=1008, reason="student account required")
         return False
@@ -71,6 +55,44 @@ async def _authenticate(websocket: WebSocket, learner_id: str) -> bool:
         await websocket.close(code=1008, reason="cannot connect as another learner")
         return False
     return True
+
+
+async def _authenticate(websocket: WebSocket, learner_id: str) -> bool:
+    """优先用一次性 ?ticket=...；旧 ?token= 仅在显式开启时兼容。"""
+    store = websocket.app.state.orchestrator.store
+    now = datetime.now(timezone.utc)
+    ticket = websocket.query_params.get("ticket", "")
+    if ticket:
+        user_id = await store.consume_ws_ticket(hash_session_token(ticket), now)
+        if user_id is None:
+            await websocket.close(code=1008, reason="invalid or expired ticket")
+            return False
+        return await _authorize_student(
+            websocket, await store.get_user_by_id(user_id), learner_id
+        )
+
+    if not get_settings().ws_allow_query_token:
+        await websocket.close(code=1008, reason="missing ticket")
+        return False
+
+    # 兼容旧客户端：仅在 WS_ALLOW_QUERY_TOKEN=true 时接受长期 token。
+    token = websocket.query_params.get("token", "")
+    if not token:
+        await websocket.close(code=1008, reason="missing ticket")
+        return False
+    session = await store.get_session(hash_session_token(token))
+    if session is None or session.revoked_at is not None:
+        await websocket.close(code=1008, reason="invalid token")
+        return False
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        await websocket.close(code=1008, reason="token expired")
+        return False
+    return await _authorize_student(
+        websocket, await store.get_user_by_id(session.user_id), learner_id
+    )
 
 
 @ws_router.websocket("/ws/{learner_id}")
@@ -113,7 +135,7 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                 except (TypeError, ValueError):
                     time_spent = 0.0
                 try:
-                    events, attempt, replayed = await orch.submit_question(
+                    outcome = await orch.submit_question(
                         learner_id,
                         question_id,
                         answer,
@@ -132,17 +154,23 @@ async def websocket_endpoint(websocket: WebSocket, learner_id: str) -> None:
                         },
                     )
                     continue
-                question = await orch.get_question(question_id)
+                events = outcome.events
+                attempt = outcome.attempt
+                # 与 HTTP /submit 保持一致：未到揭示阈值时不返回标准答案。
+                revealed = await orch.get_question(attempt.question_id) if outcome.reveal_answer else None
                 await manager.send(
                     learner_id,
                     {
                         "event_type": "submission.result",
-                        "replayed": replayed,
+                        "replayed": outcome.replayed,
                         "question_id": attempt.question_id,
                         "knowledge_id": attempt.knowledge_id,
                         "is_correct": attempt.is_correct,
-                        "correct_answer": question.answer if question else None,
-                        "explanation": question.explanation if question else "",
+                        "correct_answer": revealed.answer if revealed else None,
+                        "explanation": revealed.explanation if revealed else "",
+                        "answer_revealed": outcome.reveal_answer,
+                        "attempts_for_question": outcome.attempts_for_question,
+                        "counts_toward_mastery": outcome.counts_toward_mastery,
                     },
                 )
             elif action == "question":

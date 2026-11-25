@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from app.config import get_settings
+
+
+def _ws_ticket(client: TestClient, token: str) -> str:
+    response = client.post(
+        "/auth/ws-ticket", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["ticket"]
 
 
 def test_health_is_public(client: TestClient) -> None:
@@ -38,6 +50,29 @@ def test_readiness_reports_503_when_database_is_down(
     assert response.json()["status"] == "not_ready"
 
 
+def test_cors_allows_only_whitelisted_origins(client: TestClient) -> None:
+    allowed_origin = get_settings().cors_origins[0]
+    allowed = client.options(
+        "/auth/login",
+        headers={
+            "Origin": allowed_origin,
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == allowed_origin
+
+    denied = client.options(
+        "/auth/login",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert denied.status_code == 400
+    assert "access-control-allow-origin" not in denied.headers
+
+
 def test_education_endpoints_require_auth(client: TestClient) -> None:
     assert client.get("/questions").status_code == 401
     assert client.get("/knowledge-graph").status_code == 401
@@ -70,8 +105,49 @@ def test_submit_is_server_graded(student) -> None:
     body = response.json()
     assert response.status_code == 200
     assert body["is_correct"] is False
-    assert body["correct_answer"] == "7"
+    # 第一次答错不揭示答案：否则「乱答一次换答案」再重交就能刷掌握度。
+    assert body["answer_revealed"] is False
+    assert body["correct_answer"] is None
+    assert body["explanation"] == ""
+    assert body["attempts_for_question"] == 1
     assert body["events_triggered"] >= 3
+
+
+def test_answer_revealed_after_second_wrong_attempt(student) -> None:
+    payload = {"question_id": "q-rational_numbers-2", "answer": "999"}
+    first = student["client"].post(
+        "/submit", headers={**student["headers"], "Idempotency-Key": "reveal-1"}, json=payload
+    ).json()
+    assert first["answer_revealed"] is False
+    assert first["correct_answer"] is None
+
+    second = student["client"].post(
+        "/submit", headers={**student["headers"], "Idempotency-Key": "reveal-2"}, json=payload
+    ).json()
+    assert second["answer_revealed"] is True
+    assert second["correct_answer"] == "7"
+    assert second["attempts_for_question"] == 2
+
+
+def test_repeat_submission_does_not_inflate_mastery(student) -> None:
+    payload = {"question_id": "q-rational_numbers-2", "answer": "7"}
+    first = student["client"].post(
+        "/submit", headers={**student["headers"], "Idempotency-Key": "repeat-1"}, json=payload
+    ).json()
+    assert first["counts_toward_mastery"] is True
+    mastery_after_first = student["client"].get(
+        f"/progress/{student['id']}", headers=student["headers"]
+    ).json()["progress"]["avg_mastery"]
+
+    second = student["client"].post(
+        "/submit", headers={**student["headers"], "Idempotency-Key": "repeat-2"}, json=payload
+    ).json()
+    assert second["counts_toward_mastery"] is False
+    progress = student["client"].get(
+        f"/progress/{student['id']}", headers=student["headers"]
+    ).json()["progress"]
+    assert progress["total_attempts"] == 2
+    assert progress["avg_mastery"] == mastery_after_first
 
 
 def test_submit_correct_answer_and_attempt(student) -> None:
@@ -179,18 +255,62 @@ def test_unknown_question_returns_404(student) -> None:
     assert response.status_code == 404
 
 
-def test_websocket_requires_token(client: TestClient, student) -> None:
-    try:
-        with client.websocket_connect(f"/ws/{student['id']}") as ws:
-            ws.receive_json()
-    except Exception:
-        return
-    raise AssertionError("websocket should reject missing token")
+def test_event_timestamp_is_identical_between_submit_and_events(student) -> None:
+    """同一个事件在 /submit 响应里和在 /events 里必须是同一个时间戳。"""
+    body = student["client"].post(
+        "/submit",
+        headers={**student["headers"], "Idempotency-Key": "ts-1"},
+        json={"question_id": "q-rational_numbers-2", "answer": "7"},
+    ).json()
+    submitted = [e["timestamp"] for e in body["events"]]
+    assert submitted
+
+    events = student["client"].get(
+        f"/events/{student['id']}", headers=student["headers"]
+    ).json()["events"]
+    stored = {e["timestamp"] for e in events}
+    assert set(submitted) <= stored
+    # 时区信息必须存在（aware UTC），否则前端/报表会各自猜。
+    assert all(ts.endswith("+00:00") for ts in submitted)
+
+
+def test_websocket_requires_ticket(client: TestClient, student) -> None:
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/ws/{student['id']}"):
+            pass
+    assert exc.value.code == 1008
+
+
+def test_websocket_rejects_legacy_query_token(client: TestClient, student) -> None:
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            f"/ws/{student['id']}?token={student['token']}"
+        ):
+            pass
+    assert exc.value.code == 1008
+
+
+def test_websocket_ticket_is_one_time(client: TestClient, student) -> None:
+    ticket = _ws_ticket(student["client"], student["token"])
+    with client.websocket_connect(f"/ws/{student['id']}?ticket={ticket}") as ws:
+        ws.send_json({"action": "ping"})
+        assert ws.receive_json()["event_type"] == "pong"
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(f"/ws/{student['id']}?ticket={ticket}"):
+            pass
+    assert exc.value.code == 1008
+
+
+def test_websocket_ticket_requires_student(client: TestClient, admin) -> None:
+    response = admin["client"].post("/auth/ws-ticket", headers=admin["headers"])
+    assert response.status_code == 403
 
 
 def test_websocket_pushes_result_and_events(client: TestClient, student) -> None:
+    ticket = _ws_ticket(student["client"], student["token"])
     with client.websocket_connect(
-        f"/ws/{student['id']}?token={student['token']}"
+        f"/ws/{student['id']}?ticket={ticket}"
     ) as ws:
         ws.send_json(
             {

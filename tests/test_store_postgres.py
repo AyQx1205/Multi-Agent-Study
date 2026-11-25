@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core.accounts import Role
+from app.core.accounts import AuditLogEntry, Role
 from app.core.content import Attempt, Question, QuestionType
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType
@@ -306,4 +306,80 @@ async def test_postgres_question_and_attempt_roundtrip() -> None:
         assert attempts[0].is_correct is True
         assert attempts[0].time_spent_seconds == 3.5
     finally:
+        await store.close()
+
+
+async def test_postgres_ws_ticket_is_atomic_and_one_time() -> None:
+    assert DSN
+    store = await PostgresStore.connect(DSN)
+    ticket_hash = f"ticket-{uuid.uuid4().hex}"
+    user_id = f"pg-user-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+    try:
+        await store.create_ws_ticket(
+            ticket_hash, user_id, now, now + timedelta(seconds=30)
+        )
+        assert await store.consume_ws_ticket(ticket_hash, now) == user_id
+        assert await store.consume_ws_ticket(ticket_hash, now) is None
+    finally:
+        await store.close()
+
+
+async def test_postgres_login_throttle_locks_and_resets() -> None:
+    assert DSN
+    store = await PostgresStore.connect(DSN)
+    key = f"login-test-{uuid.uuid4().hex}"
+    now = datetime.now(timezone.utc)
+    try:
+        assert await store.login_locked_until(key, now) is None
+        assert (
+            await store.record_login_failure(
+                key,
+                now,
+                window_seconds=60,
+                max_failures=2,
+                lock_seconds=60,
+            )
+            is None
+        )
+        locked = await store.record_login_failure(
+            key,
+            now,
+            window_seconds=60,
+            max_failures=2,
+            lock_seconds=60,
+        )
+        assert locked is not None
+        assert await store.login_locked_until(key, now) is not None
+        await store.reset_login_failures(key)
+        assert await store.login_locked_until(key, now) is None
+    finally:
+        await store.close()
+
+
+async def test_postgres_audit_log_roundtrip() -> None:
+    assert DSN
+    store = await PostgresStore.connect(DSN)
+    org_id = f"org-{uuid.uuid4().hex[:8]}"
+    entry = AuditLogEntry(
+        id=f"a-{uuid.uuid4().hex}",
+        org_id=org_id,
+        actor_user_id="admin-1",
+        action="test.action",
+        target_type="user",
+        target_id="user-1",
+        ip="127.0.0.1",
+        user_agent="pytest",
+        metadata={"role": "admin"},
+        created_at=datetime.now(timezone.utc),
+    )
+    try:
+        await store.append_audit_log(entry)
+        entries = await store.list_audit_logs(org_id)
+        assert len(entries) == 1
+        assert entries[0].action == "test.action"
+        assert entries[0].metadata == {"role": "admin"}
+    finally:
+        async with store.pool.acquire() as conn:
+            await conn.execute("DELETE FROM audit_logs WHERE org_id=$1", org_id)
         await store.close()

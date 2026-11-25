@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from app.core.accounts import Role
 from app.security import hash_password
@@ -198,3 +199,65 @@ def test_platform_can_onboard_another_school(admin, monkeypatch) -> None:
         headers=auth_headers(second_token),
     )
     assert allowed.status_code == 200
+
+
+def test_login_rate_limit_locks_after_repeated_failures(admin, monkeypatch) -> None:
+    monkeypatch.setenv("LOGIN_MAX_FAILURES", "2")
+    monkeypatch.setenv("LOGIN_LOCK_SECONDS", "60")
+    payload = {
+        "org_slug": "test-school",
+        "email": "admin@test.local",
+        "password": "wrong-password",
+    }
+    assert admin["client"].post("/auth/login", json=payload).status_code == 401
+    assert admin["client"].post("/auth/login", json=payload).status_code == 401
+
+    blocked = admin["client"].post("/auth/login", json=payload)
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) >= 1
+
+
+def test_login_ip_limit_blocks_credential_stuffing(admin, monkeypatch) -> None:
+    monkeypatch.setenv("LOGIN_MAX_FAILURES", "20")
+    monkeypatch.setenv("LOGIN_IP_MAX_FAILURES", "2")
+    monkeypatch.setenv("LOGIN_LOCK_SECONDS", "60")
+    first = {
+        "org_slug": "test-school",
+        "email": "first@test.local",
+        "password": "wrong-password",
+    }
+    second = {**first, "email": "second@test.local"}
+    assert admin["client"].post("/auth/login", json=first).status_code == 401
+    assert admin["client"].post("/auth/login", json=first).status_code == 401
+    assert admin["client"].post("/auth/login", json=second).status_code == 429
+
+
+def test_successful_login_resets_failure_counter(admin, monkeypatch) -> None:
+    monkeypatch.setenv("LOGIN_MAX_FAILURES", "3")
+    monkeypatch.setenv("LOGIN_LOCK_SECONDS", "60")
+    wrong = {
+        "org_slug": "test-school",
+        "email": "admin@test.local",
+        "password": "wrong-password",
+    }
+    right = {**wrong, "password": "admin-pass-123"}
+    assert admin["client"].post("/auth/login", json=wrong).status_code == 401
+    assert admin["client"].post("/auth/login", json=wrong).status_code == 401
+    assert admin["client"].post("/auth/login", json=right).status_code == 200
+    assert admin["client"].post("/auth/login", json=wrong).status_code == 401
+    assert admin["client"].post("/auth/login", json=right).status_code == 200
+
+
+def test_audit_log_is_admin_only_and_has_no_secrets(admin, student) -> None:
+    response = admin["client"].get("/auth/audit", headers=admin["headers"])
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    actions = {item["action"] for item in items}
+    assert {"bootstrap", "login.success", "user.create"} <= actions
+    dumped = json.dumps(items)
+    assert "admin-pass-123" not in dumped
+    assert "student-pass-123" not in dumped
+    assert "access_token" not in dumped
+
+    forbidden = student["client"].get("/auth/audit", headers=student["headers"])
+    assert forbidden.status_code == 403

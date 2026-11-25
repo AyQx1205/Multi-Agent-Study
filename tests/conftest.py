@@ -7,14 +7,46 @@ import os
 os.environ["DATABASE_URL"] = ""
 os.environ["SQLITE_PATH"] = ":memory:"
 
+import uuid
+
 from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import app
-from app.core.events import Event, EventBus
+from app.core.events import Event, EventType, EventBus
 from app.orchestrator import AgentOrchestrator
+
+
+async def publish_submission(
+    orchestrator: AgentOrchestrator,
+    learner_id: str,
+    knowledge_id: str,
+    is_correct: bool,
+    time_spent: float = 0.0,
+) -> list[Event]:
+    """测试专用：直接发一条 `student.submission` 事件。
+
+    生产链路只有一条——`AgentOrchestrator.submit_question`（服务端判分 +
+    幂等 + 事务）。Agent 单测要断言的是「喂一个事件，它该发什么事件」，
+    所以这里绕过判分直接投递事件，避免测试依赖具体题库内容。
+    """
+    cid = f"c-test-{uuid.uuid4().hex[:8]}"
+    await orchestrator.event_bus.publish(
+        Event(
+            type=EventType.STUDENT_SUBMISSION,
+            source="test",
+            learner_id=learner_id,
+            data={
+                "knowledge_id": knowledge_id,
+                "is_correct": is_correct,
+                "time_spent_seconds": time_spent,
+            },
+            correlation_id=cid,
+        )
+    )
+    return orchestrator.event_bus.get_history(correlation_id=cid, limit=200)
 
 
 def auth_headers(token: str) -> dict[str, str]:
@@ -115,6 +147,43 @@ def make_orch():
         orchestrator = AgentOrchestrator(**kwargs)
         created.append(orchestrator)
         return orchestrator
+
+    return factory
+
+
+@pytest.fixture
+def submit(orch):
+    """Agent 单测用的事件投递器（绑定默认 orch）。"""
+
+    async def _submit(
+        learner_id: str,
+        knowledge_id: str,
+        is_correct: bool,
+        time_spent: float = 0.0,
+    ) -> list[Event]:
+        return await publish_submission(
+            orch, learner_id, knowledge_id, is_correct, time_spent
+        )
+
+    return _submit
+
+
+@pytest.fixture
+def submit_for():
+    """给自定义 orch（注入时钟/LLM）用的投递器工厂。"""
+
+    def factory(orchestrator: AgentOrchestrator):
+        async def _submit(
+            learner_id: str,
+            knowledge_id: str,
+            is_correct: bool,
+            time_spent: float = 0.0,
+        ) -> list[Event]:
+            return await publish_submission(
+                orchestrator, learner_id, knowledge_id, is_correct, time_spent
+            )
+
+        return _submit
 
     return factory
 

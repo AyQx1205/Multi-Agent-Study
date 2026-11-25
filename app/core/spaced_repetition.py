@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.timeutil import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +21,23 @@ class ReviewItem(BaseModel):
     last_review: datetime | None = Field(default=None, description="上次复习时间")
     total_reviews: int = Field(default=0, description="总复习次数")
 
+    @field_validator("next_review", "last_review")
+    @classmethod
+    def _normalize_review_times(cls, value: datetime | None) -> datetime | None:
+        """入口统一成 aware UTC，避免 naive/aware 混用导致比较直接抛 TypeError。"""
+        return ensure_utc(value)
+
     def is_due(self, now: datetime | None = None) -> bool:
-        return (now or datetime.now()) >= self.next_review
+        return (ensure_utc(now) or utcnow()) >= (ensure_utc(self.next_review) or utcnow())
 
     def overdue_days(self, now: datetime | None = None) -> float:
-        return max(0.0, ((now or datetime.now()) - self.next_review).total_seconds() / 86400)
+        current = ensure_utc(now) or utcnow()
+        due = ensure_utc(self.next_review) or current
+        return max(0.0, (current - due).total_seconds() / 86400)
 
 class SpacedRepetition:
     def review(self,item: ReviewItem,quality: int,now:datetime | None = None) -> ReviewItem:
-        now = now or datetime.now()
+        now = ensure_utc(now) or utcnow()
         quality = max(0, min(5,int(quality)))
 
         item.total_reviews += 1
@@ -52,19 +62,27 @@ class SpacedRepetition:
         return item
 
     def get_due_items(self,items: list[ReviewItem],now: datetime | None = None) -> list[ReviewItem]:
-        now = now or datetime.now()
-        due = [item for item in items if item.next_review <= now]
+        current = ensure_utc(now) or utcnow()
+        due = [item for item in items if (ensure_utc(item.next_review) or current) <= current]
         return sorted(due,key=lambda x: x.next_review)
 
     def get_study_schedule(self,items: list[ReviewItem],days_ahead: int = 7,now: datetime | None = None) -> dict[str,list[str]]:
-        now = now or datetime.now()
+        current = ensure_utc(now) or utcnow()
         schedule:dict[str,list[str]] = {}
         for offset in range(days_ahead):
-            day = (now + timedelta(days=offset)).date()
+            day = (current + timedelta(days=offset)).date()
             if offset == 0:
-                bucket = [item.knowledge_id for item in items if item.next_review.date() <= day]
+                bucket = [
+                    item.knowledge_id
+                    for item in items
+                    if (ensure_utc(item.next_review) or current).date() <= day
+                ]
             else:
-                bucket = [item.knowledge_id for item in items if item.next_review.date() == day]
+                bucket = [
+                    item.knowledge_id
+                    for item in items
+                    if (ensure_utc(item.next_review) or current).date() == day
+                ]
             if bucket:
                 schedule[day.isoformat()] = sorted(set(bucket))        
         return schedule    

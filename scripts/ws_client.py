@@ -7,6 +7,8 @@
 
 也可以直接给 token（仍需 learner-id）：
     python scripts/ws_client.py --token "$env:WS_TOKEN" --learner-id <user-id>
+
+WebSocket 已改为短时一次性 ticket；脚本会先用登录 token 调用 /auth/ws-ticket。
 """
 
 from __future__ import annotations
@@ -52,26 +54,40 @@ def authenticate(args: argparse.Namespace) -> tuple[str, str]:
                 timeout=10,
             )
             response.raise_for_status()
-            return args.token, args.learner_id or response.json()["id"]
-
-        if not args.org or not args.email or not args.password:
-            raise SystemExit(
-                "请提供 --org/--email/--password（或设置 WS_ORG/WS_EMAIL/WS_PASSWORD），"
-                "也可以直接传 --token + --learner-id。"
+            token = args.token
+            learner_id = args.learner_id or response.json()["id"]
+        else:
+            if not args.org or not args.email or not args.password:
+                raise SystemExit(
+                    "请提供 --org/--email/--password（或设置 WS_ORG/WS_EMAIL/WS_PASSWORD），"
+                    "也可以直接传 --token + --learner-id。"
+                )
+            response = httpx.post(
+                f"{base}/auth/login",
+                json={
+                    "org_slug": args.org,
+                    "email": args.email,
+                    "password": args.password,
+                },
+                timeout=10,
             )
-        response = httpx.post(
-            f"{base}/auth/login",
-            json={
-                "org_slug": args.org,
-                "email": args.email,
-                "password": args.password,
-            },
+            if response.status_code != 200:
+                raise SystemExit(f"登录失败 HTTP {response.status_code}: {response.text}")
+            body = response.json()
+            token = body["access_token"]
+            learner_id = body["user"]["id"]
+
+        ticket_response = httpx.post(
+            f"{base}/auth/ws-ticket",
+            headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
-        if response.status_code != 200:
-            raise SystemExit(f"登录失败 HTTP {response.status_code}: {response.text}")
-        body = response.json()
-        return body["access_token"], body["user"]["id"]
+        if ticket_response.status_code != 201:
+            raise SystemExit(
+                f"获取 WebSocket ticket 失败 HTTP {ticket_response.status_code}: "
+                f"{ticket_response.text}"
+            )
+        return ticket_response.json()["ticket"], learner_id
     except httpx.RequestError as exc:
         raise SystemExit(
             f"无法连接 {base}：{exc}\n先确认 uvicorn 已启动。"
@@ -80,10 +96,10 @@ def authenticate(args: argparse.Namespace) -> tuple[str, str]:
 
 async def main() -> None:
     args = parse_args()
-    token, learner_id = authenticate(args)
+    ticket, learner_id = authenticate(args)
     base = args.base_url.rstrip("/")
     ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
-    url = f"{ws_base}/ws/{learner_id}?token={token}"
+    url = f"{ws_base}/ws/{learner_id}?ticket={ticket}"
     idempotency_key = args.idempotency_key or f"ws-{uuid.uuid4().hex}"
 
     try:

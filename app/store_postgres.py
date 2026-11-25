@@ -16,15 +16,16 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.core.accounts import Classroom, Organization, Role, SessionRecord, User
+from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
 from app.core.content import Attempt, Question, QuestionType
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event, EventType
 from app.core.learner_model import KnowledgeState, LearnerModel
 from app.core.spaced_repetition import ReviewItem
+from app.core.timeutil import ensure_utc, utcnow
 
 try:
     import asyncpg
@@ -158,14 +159,47 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     revoked_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON auth_sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_ws_tickets_user ON ws_tickets(user_id);
+
+CREATE TABLE IF NOT EXISTS login_throttle (
+    throttle_key TEXT PRIMARY KEY,
+    failures     INTEGER NOT NULL DEFAULT 0,
+    window_start TIMESTAMPTZ NOT NULL,
+    locked_until TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT,
+    actor_user_id TEXT,
+    action        TEXT NOT NULL,
+    target_type   TEXT,
+    target_id     TEXT,
+    ip            TEXT,
+    user_agent    TEXT,
+    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org_created ON audit_logs(org_id, created_at);
 """
 
 
 def _utc(value: datetime | None) -> datetime | None:
-    """asyncpg 对 TIMESTAMPTZ 建议传 aware datetime；naive 按 UTC 处理。"""
-    if value is None:
-        return None
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    """统一成 aware UTC。
+
+    naive 值（历史数据 / 测试注入的时钟）按 UTC 解释；aware 值换算到 UTC。
+    之前这里是 `value.replace(tzinfo=utc)`，会把本机 naive 时间原样标成 UTC，
+    导致落库时间整体偏移一个时区。
+    """
+    return ensure_utc(value)
 
 
 def advisory_key(learner_id: str) -> int:
@@ -230,7 +264,13 @@ class PostgresStore:
             # 只 ping 不够：迁移没跑完时数据库可达但不能接流量。
             return bool(
                 await conn.fetchval(
-                    "SELECT to_regclass('public.attempts') IS NOT NULL"
+                    """
+                    SELECT
+                        to_regclass('public.attempts') IS NOT NULL
+                        AND to_regclass('public.ws_tickets') IS NOT NULL
+                        AND to_regclass('public.login_throttle') IS NOT NULL
+                        AND to_regclass('public.audit_logs') IS NOT NULL
+                    """
                 )
             )
 
@@ -303,7 +343,7 @@ class PostgresStore:
                 attempts=row["attempts"],
                 correct_count=row["correct_count"],
                 streak=row["streak"],
-                last_attempt=row["last_attempt"],
+                last_attempt=ensure_utc(row["last_attempt"]),
             )
         return model
 
@@ -328,7 +368,7 @@ class PostgresStore:
                 attempts=row["attempts"],
                 correct_count=row["correct_count"],
                 streak=row["streak"],
-                last_attempt=row["last_attempt"],
+                last_attempt=ensure_utc(row["last_attempt"]),
             )
         return model
 
@@ -340,19 +380,13 @@ class PostgresStore:
         )
         result: dict[str, ReviewItem] = {}
         for row in rows:
-            next_review = row["next_review"]
-            last_review = row["last_review"]
-            if next_review is not None and next_review.tzinfo is not None:
-                next_review = next_review.replace(tzinfo=None)
-            if last_review is not None and last_review.tzinfo is not None:
-                last_review = last_review.replace(tzinfo=None)
             result[row["knowledge_id"]] = ReviewItem(
                 knowledge_id=row["knowledge_id"],
                 easiness_factor=row["easiness_factor"],
                 interval_days=row["interval_days"],
                 repetition=row["repetition"],
-                next_review=next_review,
-                last_review=last_review,
+                next_review=ensure_utc(row["next_review"]) or utcnow(),
+                last_review=ensure_utc(row["last_review"]),
                 total_reviews=row["total_reviews"],
             )
         return result
@@ -830,6 +864,159 @@ class PostgresStore:
                 token_hash,
             )
 
+    # ── WebSocket 一次性 ticket ──
+    async def create_ws_ticket(
+        self,
+        ticket_hash: str,
+        user_id: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ws_tickets(ticket_hash, user_id, created_at, expires_at)
+                VALUES ($1,$2,$3,$4)
+                """,
+                ticket_hash,
+                user_id,
+                _utc(created_at),
+                _utc(expires_at),
+            )
+
+    async def consume_ws_ticket(self, ticket_hash: str, now: datetime) -> str | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE ws_tickets
+                SET used_at=$2
+                WHERE ticket_hash=$1 AND used_at IS NULL AND expires_at > $2
+                RETURNING user_id
+                """,
+                ticket_hash,
+                _utc(now),
+            )
+        return row["user_id"] if row is not None else None
+
+    # ── 登录限流 ──
+    async def login_locked_until(self, throttle_key: str, now: datetime) -> datetime | None:
+        async with self.pool.acquire() as conn:
+            locked_until = await conn.fetchval(
+                "SELECT locked_until FROM login_throttle WHERE throttle_key=$1",
+                throttle_key,
+            )
+        return locked_until if locked_until is not None and locked_until > now else None
+
+    async def record_login_failure(
+        self,
+        throttle_key: str,
+        now: datetime,
+        *,
+        window_seconds: int,
+        max_failures: int,
+        lock_seconds: int,
+    ) -> datetime | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock($1)",
+                    advisory_key(f"login:{throttle_key}"),
+                )
+                row = await conn.fetchrow(
+                    "SELECT * FROM login_throttle WHERE throttle_key=$1",
+                    throttle_key,
+                )
+                window_start = now
+                failures = 1
+                if row is not None:
+                    previous = row["window_start"]
+                    if previous.tzinfo is None:
+                        previous = previous.replace(tzinfo=timezone.utc)
+                    if previous > now - timedelta(seconds=window_seconds):
+                        window_start = previous
+                        failures = int(row["failures"]) + 1
+                locked_until = (
+                    now + timedelta(seconds=lock_seconds)
+                    if failures >= max_failures
+                    else None
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO login_throttle(throttle_key, failures, window_start, locked_until)
+                    VALUES ($1,$2,$3,$4)
+                    ON CONFLICT (throttle_key) DO UPDATE SET
+                        failures=excluded.failures,
+                        window_start=excluded.window_start,
+                        locked_until=excluded.locked_until
+                    """,
+                    throttle_key,
+                    failures,
+                    _utc(window_start),
+                    _utc(locked_until),
+                )
+        return locked_until
+
+    async def reset_login_failures(self, throttle_key: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM login_throttle WHERE throttle_key=$1", throttle_key
+            )
+
+    # ── 审计日志 ──
+    async def append_audit_log(self, entry: AuditLogEntry) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO audit_logs
+                    (id, org_id, actor_user_id, action, target_type, target_id,
+                     ip, user_agent, metadata, created_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                entry.id,
+                entry.org_id,
+                entry.actor_user_id,
+                entry.action,
+                entry.target_type,
+                entry.target_id,
+                entry.ip,
+                entry.user_agent,
+                json.dumps(entry.metadata, ensure_ascii=False, default=str),
+                _utc(entry.created_at),
+            )
+
+    async def list_audit_logs(self, org_id: str, limit: int = 100) -> list[AuditLogEntry]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM audit_logs
+                WHERE org_id=$1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                org_id,
+                max(1, min(limit, 500)),
+            )
+        return [
+            AuditLogEntry(
+                id=row["id"],
+                org_id=row["org_id"],
+                actor_user_id=row["actor_user_id"],
+                action=row["action"],
+                target_type=row["target_type"],
+                target_id=row["target_id"],
+                ip=row["ip"],
+                user_agent=row["user_agent"],
+                metadata=(
+                    json.loads(row["metadata"])
+                    if isinstance(row["metadata"], str)
+                    else row["metadata"]
+                ),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
     async def save_reviews(self, learner_id: str, items: dict[str, ReviewItem]) -> None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -866,20 +1053,13 @@ class PostgresStore:
             )
         result: dict[str, ReviewItem] = {}
         for row in rows:
-            next_review = row["next_review"]
-            last_review = row["last_review"]
-            # Curriculum 的时钟是 naive datetime；去掉 tzinfo 保持同一套墙钟时间。
-            if next_review is not None and next_review.tzinfo is not None:
-                next_review = next_review.replace(tzinfo=None)
-            if last_review is not None and last_review.tzinfo is not None:
-                last_review = last_review.replace(tzinfo=None)
             result[row["knowledge_id"]] = ReviewItem(
                 knowledge_id=row["knowledge_id"],
                 easiness_factor=row["easiness_factor"],
                 interval_days=row["interval_days"],
                 repetition=row["repetition"],
-                next_review=next_review,
-                last_review=last_review,
+                next_review=ensure_utc(row["next_review"]) or utcnow(),
+                last_review=ensure_utc(row["last_review"]),
                 total_reviews=row["total_reviews"],
             )
         return result
@@ -1070,6 +1250,18 @@ class PostgresStore:
                 idempotency_key,
             )
         return self._attempt_from_row(row) if row else None
+
+    async def count_question_attempts(self, learner_id: str, question_id: str) -> int:
+        """这道题此前被该学生提交过几次；用于判断是否首次作答。"""
+        async with self.pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM attempts WHERE learner_id=$1 AND question_id=$2",
+                    learner_id,
+                    question_id,
+                )
+                or 0
+            )
 
     async def list_attempts(self, learner_id: str, limit: int = 50) -> list[Attempt]:
         async with self.pool.acquire() as conn:

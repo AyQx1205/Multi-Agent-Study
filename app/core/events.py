@@ -3,16 +3,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from enum import Enum
 from typing import Any,Awaitable,Callable
 
-from pydantic import BaseModel,Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.timeutil import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
 MAX_DEPTH = 20
 HISTORY_LIMIT = 1000
+
+# 深度必须是「每条事件链自己的。」实例级计数器会被并发链共享：
+# 几个学生同时答题就能把总计数顶到上限，导致正常事件被丢弃。
+_DEPTH: ContextVar[int] = ContextVar("event_bus_depth", default=0)
 
 class EventType(str, Enum):
     # 学生输入
@@ -48,9 +55,15 @@ class Event(BaseModel):
     type: EventType = Field(description="事件类型")
     source: str = Field(description="事件来源")
     learner_id: str = Field(description="学习者ID")
-    timestamp: datetime = Field(default_factory=datetime.now,description="事件时间戳")
+    timestamp: datetime = Field(default_factory=utcnow,description="事件时间戳")
     data: dict[str, Any] = Field(default_factory=dict,description="事件数据")
     correlation_id: str | None = Field(None,description="事件关联ID")
+
+    @field_validator("timestamp")
+    @classmethod
+    def _normalize_timestamp(cls, value: datetime) -> datetime:
+        """入口统一成 aware UTC：naive 输入也按 UTC 解释。"""
+        return ensure_utc(value) or utcnow()
 
 EventHandler = Callable[[Event], Awaitable[None]]
 
@@ -59,7 +72,6 @@ class EventBus:
         self._subscribers: dict[EventType, list[EventHandler]] = {}
         self._history: list[Event] = []
         self._lock = asyncio.Lock()
-        self._depth = 0
         # 同步提交期间，该 correlation 下的嵌套事件也必须把错误传回事务边界。
         self._strict_correlations: set[str] = set()
 
@@ -83,7 +95,7 @@ class EventBus:
             event.correlation_id is not None
             and event.correlation_id in self._strict_correlations
         )
-        if self._depth >= MAX_DEPTH:
+        if _DEPTH.get() >= MAX_DEPTH:
             if strict:
                 raise RuntimeError("event depth limit reached during submission")
             logger.error(
@@ -104,7 +116,8 @@ class EventBus:
             logger.debug("no handler for %s", event.type.value)
             return
 
-        self._depth += 1
+        depth = _DEPTH.get()
+        token = _DEPTH.set(depth + 1)
         try:
             results = await asyncio.gather(
                 *(self._safe_call(h, event) for h in handlers)
@@ -114,7 +127,7 @@ class EventBus:
                     if isinstance(result, BaseException):
                         raise result
         finally:
-            self._depth -= 1
+            _DEPTH.reset(token)
 
     async def _safe_call(
         self, handler: EventHandler, event: Event

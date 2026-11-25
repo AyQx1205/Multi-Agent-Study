@@ -14,7 +14,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
-from app.core.accounts import Classroom, Organization, Role, SessionRecord, User
+from app.core.accounts import AuditLogEntry, Classroom, Organization, Role, SessionRecord, User
 from app.core.content import Attempt, Question
 from app.core.errors import IdempotencyConflictError
 from app.core.events import Event
@@ -79,6 +79,10 @@ class Store(Protocol):
         self, learner_id: str, idempotency_key: str
     ) -> Attempt | None: ...
 
+    async def count_question_attempts(
+        self, learner_id: str, question_id: str
+    ) -> int: ...
+
     async def list_attempts(self, learner_id: str, limit: int = 50) -> list[Attempt]: ...
 
     async def count_users(self) -> int: ...
@@ -129,6 +133,36 @@ class Store(Protocol):
 
     async def revoke_session(self, token_hash: str) -> None: ...
 
+    async def create_ws_ticket(
+        self,
+        ticket_hash: str,
+        user_id: str,
+        created_at: Any,
+        expires_at: Any,
+    ) -> None: ...
+
+    async def consume_ws_ticket(self, ticket_hash: str, now: Any) -> str | None: ...
+
+    async def login_locked_until(self, throttle_key: str, now: Any) -> Any: ...
+
+    async def record_login_failure(
+        self,
+        throttle_key: str,
+        now: Any,
+        *,
+        window_seconds: int,
+        max_failures: int,
+        lock_seconds: int,
+    ) -> Any: ...
+
+    async def reset_login_failures(self, throttle_key: str) -> None: ...
+
+    async def append_audit_log(self, entry: AuditLogEntry) -> None: ...
+
+    async def list_audit_logs(
+        self, org_id: str, limit: int = 100
+    ) -> list[AuditLogEntry]: ...
+
     async def close(self) -> None: ...
 
 
@@ -141,9 +175,9 @@ class SqliteStoreAdapter:
         self._inner = inner
         self._lock = asyncio.Lock()
 
-    async def _call(self, func: Any, *args: Any) -> Any:
+    async def _call(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         async with self._lock:
-            return await asyncio.to_thread(func, *args)
+            return await asyncio.to_thread(func, *args, **kwargs)
 
     async def healthcheck(self) -> bool:
         return await self._call(self._inner.healthcheck)
@@ -261,6 +295,13 @@ class SqliteStoreAdapter:
     async def list_attempts(self, learner_id: str, limit: int = 50) -> list[Attempt]:
         return await self._call(self._inner.list_attempts, learner_id, limit)
 
+    async def count_question_attempts(
+        self, learner_id: str, question_id: str
+    ) -> int:
+        return await self._call(
+            self._inner.count_question_attempts, learner_id, question_id
+        )
+
     async def count_users(self) -> int:
         return await self._call(self._inner.count_users)
 
@@ -341,6 +382,56 @@ class SqliteStoreAdapter:
 
     async def revoke_session(self, token_hash: str) -> None:
         await self._call(self._inner.revoke_session, token_hash)
+
+    async def create_ws_ticket(
+        self,
+        ticket_hash: str,
+        user_id: str,
+        created_at: Any,
+        expires_at: Any,
+    ) -> None:
+        await self._call(
+            self._inner.create_ws_ticket,
+            ticket_hash,
+            user_id,
+            created_at,
+            expires_at,
+        )
+
+    async def consume_ws_ticket(self, ticket_hash: str, now: Any) -> str | None:
+        return await self._call(self._inner.consume_ws_ticket, ticket_hash, now)
+
+    async def login_locked_until(self, throttle_key: str, now: Any) -> Any:
+        return await self._call(self._inner.login_locked_until, throttle_key, now)
+
+    async def record_login_failure(
+        self,
+        throttle_key: str,
+        now: Any,
+        *,
+        window_seconds: int,
+        max_failures: int,
+        lock_seconds: int,
+    ) -> Any:
+        return await self._call(
+            self._inner.record_login_failure,
+            throttle_key,
+            now,
+            window_seconds=window_seconds,
+            max_failures=max_failures,
+            lock_seconds=lock_seconds,
+        )
+
+    async def reset_login_failures(self, throttle_key: str) -> None:
+        await self._call(self._inner.reset_login_failures, throttle_key)
+
+    async def append_audit_log(self, entry: AuditLogEntry) -> None:
+        await self._call(self._inner.append_audit_log, entry)
+
+    async def list_audit_logs(
+        self, org_id: str, limit: int = 100
+    ) -> list[AuditLogEntry]:
+        return await self._call(self._inner.list_audit_logs, org_id, limit)
 
     async def close(self) -> None:
         await self._call(self._inner.close)

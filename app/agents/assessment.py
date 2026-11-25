@@ -51,9 +51,15 @@ class AssessmentAgent(BaseAgent):
             )
         is_correct = bool(event.data.get("is_correct", False))
         cid = event.correlation_id
+        # 同一道题的重复作答只算练习：学生已经看过答案/解析，再答对不能
+        # 作为掌握度提升的证据。计数仍然更新，连错判定与提示升级依赖它。
+        counts_toward_mastery = bool(event.data.get("counts_toward_mastery", True))
 
         model = self.get_learner_model(learner_id)
-        state = model.update_mastery(knowledge_id, is_correct)
+        if counts_toward_mastery:
+            state = model.update_mastery(knowledge_id, is_correct)
+        else:
+            state = model.record_attempt(knowledge_id, is_correct)
 
         await self.emit(
             EventType.MASTERY_UPDATED,

@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from app.agents.base import BaseAgent
 from app.core.events import Event, EventType
+from app.core.timeutil import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,12 @@ class LearnerEngagement:
 
     def __init__(self, learner_id: str, clock: Callable[[], datetime] | None = None) -> None:
         self.learner_id = learner_id
-        self._clock = clock or datetime.now
+        self._clock = clock or utcnow
         self.state = LearningState.FOCUSED
         self.recent_results: list[bool] = []
         self.recent_response_times: list[float] = []
-        self.session_start = self._clock()
-        self.last_activity = self._clock()
+        self.session_start = ensure_utc(self._clock()) or utcnow()
+        self.last_activity = ensure_utc(self._clock()) or utcnow()
         self.consecutive_errors = 0
         self.consecutive_correct = 0
         self.total_interactions = 0
@@ -39,11 +40,15 @@ class LearnerEngagement:
 
     @property
     def session_duration_minutes(self) -> float:
-        return (self._clock() - self.session_start).total_seconds() / 60
+        now = ensure_utc(self._clock()) or utcnow()
+        start = ensure_utc(self.session_start) or now
+        return (now - start).total_seconds() / 60
 
     @property
     def idle_seconds(self) -> float:
-        return (self._clock() - self.last_activity).total_seconds()
+        now = ensure_utc(self._clock()) or utcnow()
+        last = ensure_utc(self.last_activity) or now
+        return (now - last).total_seconds()
 
     @property
     def recent_accuracy(self) -> float:
@@ -58,7 +63,7 @@ class LearnerEngagement:
 
 class EngagementAgent(BaseAgent):
     def __init__(self, *args: Any, clock: Callable[[], datetime] | None = None, **kwargs: Any) -> None:
-        self._clock = clock or datetime.now
+        self._clock = clock or utcnow
         self._engagements: dict[str, LearnerEngagement] = {}
         super().__init__(*args, **kwargs)
 
@@ -76,7 +81,7 @@ class EngagementAgent(BaseAgent):
         elif event.type is EventType.ASSESSMENT_COMPLETE:
             await self._analyze(event)
         elif event.type is EventType.STUDENT_MESSAGE:
-            self._get(event.learner_id).last_activity = self._clock()
+            self._get(event.learner_id).last_activity = ensure_utc(self._clock()) or utcnow()
 
     def _get(self, learner_id: str) -> LearnerEngagement:
         if learner_id not in self._engagements:
@@ -88,7 +93,7 @@ class EngagementAgent(BaseAgent):
         is_correct = bool(event.data.get("is_correct", False))
         time_spent = float(event.data.get("time_spent_seconds", 0) or 0)
 
-        eng.last_activity = self._clock()
+        eng.last_activity = ensure_utc(self._clock()) or utcnow()
         eng.total_interactions += 1
         eng.recent_results.append(is_correct)
         if time_spent > 0:
@@ -131,7 +136,7 @@ class EngagementAgent(BaseAgent):
     async def _analyze(self, event: Event) -> None:
         # 提问也会触发 complete，但不是答题，跳过状态判定
         if event.data.get("context") == "student_question":
-            self._get(event.learner_id).last_activity = self._clock()
+            self._get(event.learner_id).last_activity = ensure_utc(self._clock()) or utcnow()
             return
 
         eng = self._get(event.learner_id)

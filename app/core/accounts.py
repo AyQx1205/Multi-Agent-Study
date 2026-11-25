@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,19 @@ class SessionRecord(BaseModel):
     created_at: datetime
     expires_at: datetime
     revoked_at: datetime | None = None
+
+
+class AuditLogEntry(BaseModel):
+    id: str
+    org_id: str | None = None
+    actor_user_id: str | None = None
+    action: str
+    target_type: str | None = None
+    target_id: str | None = None
+    ip: str | None = None
+    user_agent: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
 
 
 class Principal(BaseModel):

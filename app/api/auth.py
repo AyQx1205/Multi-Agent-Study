@@ -10,7 +10,7 @@ import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,7 @@ from app.api.deps import (
     get_principal,
     require_roles,
 )
+from app.audit import client_ip, record_audit
 from app.config import get_settings
 from app.core.accounts import Principal, Role, User
 from app.security import (
@@ -120,6 +121,15 @@ async def bootstrap(req: BootstrapRequest, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     token, expires_at = await _issue_session(request, admin)
+    await record_audit(
+        store,
+        "bootstrap",
+        org_id=org.id,
+        actor_user_id=admin.id,
+        request=request,
+        target_type="organization",
+        target_id=org.id,
+    )
     return {"organization": {"id": org.id, "name": org.name, "slug": org.slug}} | _session_payload(
         admin, token, expires_at
     )
@@ -148,6 +158,15 @@ async def create_organization(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await record_audit(
+        store,
+        "organization.onboard",
+        org_id=org.id,
+        request=request,
+        target_type="organization",
+        target_id=org.id,
+        metadata={"admin_user_id": admin.id},
+    )
     return {
         "organization": {"id": org.id, "name": org.name, "slug": org.slug},
         "admin": _public_user(admin),
@@ -156,22 +175,116 @@ async def create_organization(
 
 @router.post("/login")
 async def login(req: LoginRequest, request: Request) -> dict[str, Any]:
+    settings = get_settings()
     store = request.app.state.orchestrator.store
+    now = datetime.now(timezone.utc)
+    email = req.email.lower().strip()
+    ip = client_ip(request) or "unknown"
+    # 只锁定“账号 + 来源 IP”组合，避免攻击者用少量失败请求锁死全公司账号。
+    throttle_key = f"login:{req.org_slug.lower()}:{email}:{ip}"
+    ip_key = f"login-ip:{ip}"
+
+    pair_locked = await store.login_locked_until(throttle_key, now)
+    ip_locked = await store.login_locked_until(ip_key, now)
+    locked_until = max(
+        (value for value in (pair_locked, ip_locked) if value is not None),
+        default=None,
+    )
+    if locked_until is not None:
+        retry_after = max(1, int((locked_until - now).total_seconds()))
+        await record_audit(
+            store,
+            "login.blocked",
+            request=request,
+            metadata={"reason": "rate_limited"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many failed login attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    async def failure(reason: str, org_id: str | None, user_id: str | None = None) -> None:
+        await store.record_login_failure(
+            throttle_key,
+            now,
+            window_seconds=settings.login_window_seconds,
+            max_failures=settings.login_max_failures,
+            lock_seconds=settings.login_lock_seconds,
+        )
+        # 额外的来源 IP 总量阈值，防止同一来源轮换账号做撞库。
+        await store.record_login_failure(
+            ip_key,
+            now,
+            window_seconds=settings.login_window_seconds,
+            max_failures=settings.login_ip_max_failures,
+            lock_seconds=settings.login_lock_seconds,
+        )
+        await record_audit(
+            store,
+            "login.failure",
+            org_id=org_id,
+            actor_user_id=user_id,
+            request=request,
+            metadata={"reason": reason},
+        )
+
     org = await store.get_organization_by_slug(req.org_slug)
     if org is None:
+        await failure("unknown_organization", None)
         raise HTTPException(status_code=401, detail="invalid credentials")
 
-    credentials = await store.get_user_credentials(org.id, req.email)
+    credentials = await store.get_user_credentials(org.id, email)
     if credentials is None:
+        await failure("unknown_user", org.id)
         raise HTTPException(status_code=401, detail="invalid credentials")
     user, password_hash = credentials
     if not verify_password(req.password, password_hash):
+        await failure("bad_password", org.id, user.id)
         raise HTTPException(status_code=401, detail="invalid credentials")
     if not user.is_active:
+        await failure("disabled", org.id, user.id)
         raise HTTPException(status_code=403, detail="user disabled")
 
+    await store.reset_login_failures(throttle_key)
     token, expires_at = await _issue_session(request, user)
+    await record_audit(
+        store,
+        "login.success",
+        org_id=user.org_id,
+        actor_user_id=user.id,
+        request=request,
+    )
     return _session_payload(user, token, expires_at)
+
+
+@router.post("/ws-ticket", status_code=status.HTTP_201_CREATED)
+async def issue_ws_ticket(
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> dict[str, str]:
+    """浏览器 WebSocket 无法设置 Authorization 头，改用短时一次性 ticket。"""
+    if not principal.is_student:
+        raise HTTPException(status_code=403, detail="student account required")
+    settings = get_settings()
+    store = request.app.state.orchestrator.store
+    ticket = new_session_token()
+    now = datetime.now(timezone.utc)
+    ttl = max(5, min(settings.ws_ticket_ttl_seconds, 300))
+    expires_at = now + timedelta(seconds=ttl)
+    await store.create_ws_ticket(
+        hash_session_token(ticket), principal.user_id, now, expires_at
+    )
+    await record_audit(
+        store,
+        "ws.ticket.issue",
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        request=request,
+        target_type="user",
+        target_id=principal.user_id,
+    )
+    return {"ticket": ticket, "expires_at": expires_at.isoformat()}
 
 
 @router.post("/logout")
@@ -180,9 +293,21 @@ async def logout(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> dict[str, str]:
     if credentials is not None and credentials.credentials:
-        await request.app.state.orchestrator.store.revoke_session(
-            hash_session_token(credentials.credentials)
-        )
+        store = request.app.state.orchestrator.store
+        token_hash = hash_session_token(credentials.credentials)
+        session = await store.get_session(token_hash)
+        user = await store.get_user_by_id(session.user_id) if session else None
+        await store.revoke_session(token_hash)
+        if user is not None:
+            await record_audit(
+                store,
+                "logout",
+                org_id=user.org_id,
+                actor_user_id=user.id,
+                request=request,
+                target_type="user",
+                target_id=user.id,
+            )
     return {"status": "logged_out"}
 
 
@@ -227,6 +352,16 @@ async def create_user(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await record_audit(
+        request.app.state.orchestrator.store,
+        "user.create",
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        request=request,
+        target_type="user",
+        target_id=user.id,
+        metadata={"role": user.role.value},
+    )
     return _public_user(user)
 
 
@@ -278,6 +413,16 @@ async def create_class(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await record_audit(
+        store,
+        "class.create",
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        request=request,
+        target_type="class",
+        target_id=classroom.id,
+        metadata={"teacher_id": classroom.teacher_id},
+    )
     return {
         "id": classroom.id,
         "name": classroom.name,
@@ -309,6 +454,16 @@ async def enroll_student(
     ):
         raise HTTPException(status_code=400, detail="student not found in this organization")
     await store.add_enrollment(class_id, student.id)
+    await record_audit(
+        store,
+        "class.enroll",
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        request=request,
+        target_type="class",
+        target_id=class_id,
+        metadata={"student_id": student.id},
+    )
     return {"status": "enrolled", "class_id": class_id, "user_id": student.id}
 
 
@@ -326,3 +481,32 @@ async def class_students(
         raise HTTPException(status_code=403, detail="not your class")
     students = await store.list_class_students(class_id)
     return {"count": len(students), "items": [_public_user(s) for s in students]}
+
+
+@router.get("/audit")
+async def list_audit(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: Principal = Depends(require_roles(Role.ADMIN)),
+) -> dict[str, Any]:
+    entries = await request.app.state.orchestrator.store.list_audit_logs(
+        principal.org_id, limit
+    )
+    return {
+        "count": len(entries),
+        "items": [
+            {
+                "id": entry.id,
+                "org_id": entry.org_id,
+                "actor_user_id": entry.actor_user_id,
+                "action": entry.action,
+                "target_type": entry.target_type,
+                "target_id": entry.target_id,
+                "ip": entry.ip,
+                "user_agent": entry.user_agent,
+                "metadata": entry.metadata,
+                "created_at": entry.created_at.isoformat(),
+            }
+            for entry in entries
+        ],
+    }

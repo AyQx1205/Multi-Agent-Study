@@ -15,14 +15,21 @@
 - Alembic：
   - `0001_baseline` 兼容存量表；
   - `0002_auth_tenancy_idempotency` 新增认证/租户表和幂等列；
+  - `0003_security_hardening` 新增 WS ticket、登录限流、审计日志表；
 - 提交事务一致性（P0-1）：
   - `attempts + knowledge_states + review_items + events` 同一事务提交，Agent/DB 失败整笔回滚；
   - PostgreSQL `pg_advisory_xact_lock(learner_id)` 串行化同一学生的多实例并发提交；
   - SQLite 开发模式 `BEGIN IMMEDIATE` + 适配器锁；
   - `/live` 与 `/ready`（数据库探测）探针；
-- 单元/集成测试覆盖登录、隔离、幂等、事务回滚、并发提交、迁移、SQLite/PostgreSQL。
+- 安全 P0（P0-2）：
+  - CORS 显式白名单，启动时拒绝 `*`；
+  - 登录失败按“学校+邮箱+IP”持久化限流/锁定，多实例共享；
+  - WebSocket 改为 30 秒一次性 ticket，默认拒绝长期 `?token=`；
+  - 审计日志表 + 管理员 `/auth/audit` 查询；
+  - Alembic `0003_security_hardening`。
+- 单元/集成测试覆盖登录、隔离、幂等、事务回滚、并发提交、迁移、CORS、限流、审计、一次性 ticket、SQLite/PostgreSQL。
 
-仍未完成：登录限流/锁定、OIDC/HttpOnly Cookie、审计日志、异步 Outbox/外部投递、CI/CD 中自动迁移、关闭启动时自动 DDL。详见 `README.md` 的“还没做的生产项”。
+仍未完成：OIDC/HttpOnly Cookie、密码强度/重置、PII/未成年人同意、异步 Outbox/外部投递、CI/CD 中自动迁移、关闭启动时自动 DDL、可观测性与多实例 WebSocket 广播。详见 `README.md` 的“还没做的生产项”。
 
 ## 0. 先定边界（W1）
 

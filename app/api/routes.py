@@ -126,7 +126,7 @@ async def submit_answer(
 ) -> dict[str, Any]:
     orch = request.app.state.orchestrator
     try:
-        events, attempt, replayed = await orch.submit_question(
+        outcome = await orch.submit_question(
             principal.user_id,
             req.question_id,
             req.answer,
@@ -141,16 +141,22 @@ async def submit_answer(
             detail="Idempotency-Key was already used with a different question or answer",
         ) from exc
 
-    question = await orch.get_question(req.question_id)
+    attempt = outcome.attempt
+    events = outcome.events
+    # 只有允许揭示时才查题拿答案，避免把标准答案无条件返回给学生。
+    question = await orch.get_question(attempt.question_id) if outcome.reveal_answer else None
     return {
-        "status": "replayed" if replayed else "processed",
-        "replayed": replayed,
+        "status": "replayed" if outcome.replayed else "processed",
+        "replayed": outcome.replayed,
         "attempt_id": attempt.id,
         "question_id": attempt.question_id,
         "knowledge_id": attempt.knowledge_id,
         "is_correct": attempt.is_correct,
         "correct_answer": question.answer if question else None,
         "explanation": question.explanation if question else "",
+        "answer_revealed": outcome.reveal_answer,
+        "attempts_for_question": outcome.attempts_for_question,
+        "counts_toward_mastery": outcome.counts_toward_mastery,
         "events_triggered": len(events),
         "events": _serialize(events),
         "correlation_id": events[-1].correlation_id if events else None,

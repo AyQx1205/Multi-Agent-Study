@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
 
@@ -24,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 class QuestionNotFoundError(LookupError):
     """题目不存在；API 层转成 404。"""
+
+
+@dataclass(frozen=True)
+class SubmissionOutcome:
+    """一次答题提交的完整结果。
+
+    除了事件链和 attempt，还带出「这道题答过几次」「是否计入掌握度」
+    「是否可以把答案告诉学生」——这三件事决定了教学反馈是否可信。
+    """
+
+    events: list[Event]
+    attempt: Attempt
+    replayed: bool
+    attempts_for_question: int
+    counts_toward_mastery: bool
+    reveal_answer: bool
 
 
 class AgentOrchestrator:
@@ -111,16 +128,6 @@ class AgentOrchestrator:
         reviews = await self.store.load_reviews(learner_id)
         self.curriculum.import_reviews(learner_id, reviews)
 
-    async def _save(self, learner_id: str) -> None:
-        if self.store is None:
-            return
-        model = self.learner_models.get(learner_id)
-        if model is not None:
-            await self.store.save_model(model)
-            await self.store.save_reviews(
-                learner_id, self.curriculum.export_reviews(learner_id)
-            )
-
     async def ensure_learner(self, learner_id: str) -> None:
         """API 查询进度前从数据库刷新，避免多 worker 下读到旧缓存。"""
         if self.store is None:
@@ -161,33 +168,6 @@ class AgentOrchestrator:
                 except Exception:
                     logger.exception("persist deferred event failed: %s", event.id)
 
-    async def submit_answer(
-            self,
-            learner_id: str,
-            knowledge_id: str,
-            is_correct: bool,
-            time_spent: float = 0,
-            correlation_id: str | None = None
-    ) -> list[Event]:
-        async with self._lock(learner_id):
-            await self._ensure_loaded(learner_id)
-            cid = correlation_id or f"c-{uuid.uuid4().hex[:8]}"
-            await self.event_bus.publish(
-                Event(
-                    type=EventType.STUDENT_SUBMISSION,
-                    source="api",
-                    learner_id=learner_id,
-                    data={
-                        "knowledge_id": knowledge_id,
-                        "is_correct": is_correct,
-                        "time_spent_seconds": time_spent
-                    },
-                    correlation_id=cid
-                )
-            )
-            await self._save(learner_id)
-            return self.event_bus.get_history(correlation_id=cid,limit=200)
-
     async def submit_question(
         self,
         learner_id: str,
@@ -196,11 +176,14 @@ class AgentOrchestrator:
         time_spent: float = 0.0,
         correlation_id: str | None = None,
         idempotency_key: str | None = None,
-    ) -> tuple[list[Event], Attempt, bool]:
+    ) -> SubmissionOutcome:
         """可信答题入口：从题库取题，服务端判分，再走事件链。
 
         整条链路（attempt + mastery + review + events）在存储层的一个事务里提交，
         并且用 learner 级锁串行化同一学生的并发提交。重复幂等键不会再次计算。
+
+        这里是**唯一**的答题入口：客户端不能自己传 is_correct，也不能走一条
+        不带判分/幂等/事务的旁路。
         """
         if self.store is None:
             raise RuntimeError("question submission requires a store")
@@ -208,6 +191,13 @@ class AgentOrchestrator:
         question = await self.store.get_question(question_id)
         if question is None:
             raise QuestionNotFoundError(question_id)
+
+        # 事务内不能再调用存储层（SQLite 适配器锁不可重入），所以「这道题此前
+        # 答过几次」在拿锁之后、进事务之前读，见下面的 `_lock` 分支。
+        attempts_for_question = 1
+        counts_toward_mastery = True
+        prior_attempts = 0
+        reveal_after = max(1, self.settings.answer_reveal_after_attempts)
 
         fingerprint = hashlib.sha256(
             f"{question.id}\0{answer.strip()}".encode("utf-8")
@@ -244,6 +234,8 @@ class AgentOrchestrator:
                             "time_spent_seconds": attempt.time_spent_seconds,
                             "question_id": question.id,
                             "idempotency_key": idempotency_key,
+                            "attempts_for_question": attempts_for_question,
+                            "counts_toward_mastery": counts_toward_mastery,
                         },
                         correlation_id=cid,
                     ),
@@ -256,34 +248,56 @@ class AgentOrchestrator:
                 self.event_bus.end_strict(cid)
             return attempt, events
 
-        self._submission_cid[learner_id] = cid
         try:
             try:
                 async with self._lock(learner_id):
-                    attempt, events, replayed = await self.store.submit_transaction(
-                        learner_id,
-                        idempotency_key,
-                        fingerprint,
-                        build,
+                    # 在锁内统计：锁外读会让并发提交都认为「这是第一次作答」，
+                    # 重复作答就会重复计入掌握度。
+                    prior_attempts = await self.store.count_question_attempts(
+                        learner_id, question.id
                     )
+                    attempts_for_question = prior_attempts + 1
+                    counts_toward_mastery = prior_attempts == 0
+                    # 标记必须在锁内设置：放到锁外会被并发提交互相覆盖，
+                    # 导致后者的事件绕过事务直接写库（SQLite 上会死锁）。
+                    self._submission_cid[learner_id] = cid
+                    try:
+                        attempt, events, replayed = await self.store.submit_transaction(
+                            learner_id,
+                            idempotency_key,
+                            fingerprint,
+                            build,
+                        )
+                    finally:
+                        self._submission_cid.pop(learner_id, None)
             except BaseException:
                 # 事务已回滚；清掉可能被 Agent 改过的内存态，下次从库里重载。
                 self._invalidate_learner(learner_id)
                 raise
-            finally:
-                self._submission_cid.pop(learner_id, None)
         finally:
             # 必须在 adapter 锁释放后再补写，避免其他学习者的事件死锁。
             await self._flush_deferred_events()
 
         if replayed:
             # 同一 key 可能由另一个 worker 写入；本进程缓存需要刷新。
+            attempts_for_question = max(1, prior_attempts)
+            counts_toward_mastery = False
             try:
                 async with self._lock(learner_id):
                     await self._reload_learner(learner_id)
             except Exception:
                 self._invalidate_learner(learner_id)
-        return events, attempt, replayed
+
+        return SubmissionOutcome(
+            events=events,
+            attempt=attempt,
+            replayed=replayed,
+            attempts_for_question=attempts_for_question,
+            counts_toward_mastery=counts_toward_mastery,
+            # 答对就揭示；答错则要等尝试次数达到阈值，避免「一次乱答换答案」。
+            reveal_answer=attempt.is_correct
+            or attempts_for_question >= reveal_after,
+        )
 
     async def get_questions(
         self,

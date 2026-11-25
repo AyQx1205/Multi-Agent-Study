@@ -85,11 +85,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="multi-agent-lite", version="0.1.0", lifespan=lifespan)
+_cors_origins = list(get_settings().cors_origins)
+if "*" in _cors_origins:
+    raise RuntimeError("CORS_ORIGINS must list explicit origins, not '*'")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-Platform-Token"],
 )
 app.include_router(auth_router)
 app.include_router(router)

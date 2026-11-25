@@ -5,7 +5,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.core.timeutil import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,11 @@ class KnowledgeState(BaseModel):
     correct_count:int = 0
     streak:int = 0
     last_attempt:datetime | None = None
+
+    @field_validator("last_attempt")
+    @classmethod
+    def _normalize_last_attempt(cls, value: datetime | None) -> datetime | None:
+        return ensure_utc(value)
 
     @property
     def level(self) -> MasteryLevel:
@@ -54,7 +61,7 @@ class LearnerModel:
         self.learner_id = learner_id
         self.bkt = bkt_params or BKTParams()
         self.knowledge_states: dict[str, KnowledgeState] = {}
-        self.session_start:datetime = datetime.now()
+        self.session_start:datetime = utcnow()
         self.total_interactions:int = 0
         self.metadata: dict[str, Any] = {}
 
@@ -90,7 +97,27 @@ class LearnerModel:
 
         state.mastery = max(0.0, min(1.0, updated))
         state.attempts += 1
-        state.last_attempt = datetime.now()
+        state.last_attempt = utcnow()
+        self.total_interactions += 1
+        return state
+
+    def record_attempt(self, knowledge_id: str, is_correct: bool) -> KnowledgeState:
+        """记录一次作答，但不改变掌握度。
+
+        用于同一道题的重复作答：学生已经看过答案/解析，再答对不能作为
+        「掌握度提升」的证据，否则乱答 → 拿答案 → 重交就能把 BKT 刷满。
+        计数仍然要更新：连错判定、提示升级、正确率都依赖它们。
+        """
+        state = self.get_state(knowledge_id)
+        if is_correct:
+            state.correct_count += 1
+            state.streak += 1
+            state.alpha += 1
+        else:
+            state.streak = 0
+            state.beta += 1
+        state.attempts += 1
+        state.last_attempt = utcnow()
         self.total_interactions += 1
         return state
 
