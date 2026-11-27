@@ -1,5 +1,7 @@
 # multi-agent-lite
 
+[![ci](https://github.com/AyQx1205/Multi-Agent-Study/actions/workflows/ci.yml/badge.svg)](https://github.com/AyQx1205/Multi-Agent-Study/actions/workflows/ci.yml)
+
 一个可运行的多智能体自适应练习后端：5 个 Agent、60 个初中数学知识点、180 道题、FastAPI REST + WebSocket、SQLite/PostgreSQL 双存储。
 
 本版在原有 Demo 上补齐了：
@@ -10,15 +12,46 @@
 - 提交幂等键 `Idempotency-Key`；
 - CORS 白名单、登录限流/锁定、一次性 WebSocket ticket、审计日志；
 - Alembic 数据库迁移；
+- Docker / docker compose 一键启动；
 - 对应的 API、存储层和测试。
 
-## 1. 启动
+## 0. 最快跑起来：Docker
+
+装了 Docker 的前提下，不需要 Python、不需要本地数据库：
+
+```bash
+docker compose up --build
+```
+
+然后打开 <http://127.0.0.1:8000/demo>（演示控制台）或 <http://127.0.0.1:8000/docs>（Swagger）。
+
+容器里做了这几件事：起 `postgres:16` → 等数据库就绪 → `alembic upgrade head` → 启动 uvicorn。
+应用侧 `AUTO_APPLY_SCHEMA=false`，所以**表结构只来自迁移**，和线上口径一致；迁移失败容器直接退出，不会带着半张表提供服务。
+
+默认 `MOCK_LLM=true`（离线、确定性、不花钱）。要接真模型，在 `.env` 里写 `MOCK_LLM=false` 和 `LLM_API_KEY=...` 再 `docker compose up`——compose 会自动把这两项插值进容器。
+
+常用命令：
+
+```bash
+docker compose logs -f app        # 看日志（迁移与启动信息都在这）
+docker compose exec db psql -U multi_agent -d multi_agent   # 进库
+curl http://127.0.0.1:8000/ready  # 就绪探针（含数据库）
+docker compose down -v            # 停掉并清空数据卷
+```
+
+> 端口：应用固定 8000；数据库映射到宿主机的 **55432**（避免和本机已有的 5432 抢端口），可用 `POSTGRES_HOST_PORT` 覆盖。
+
+## 1. 本地开发启动
 
 ```powershell
 cd D:\Multiagent\multi-agent-lite
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt -c constraints.txt
 ```
+
+> `constraints.txt` 锁定的是「本地验证过的那一组版本」。不锁的话 CI 每次会装到当天最新的
+> pytest / fastapi，很容易出现「本地全绿、CI 红」。升级依赖：改 `constraints.txt` →
+> 本地跑 ruff/mypy/pytest → 推上去让 CI 验收。
 
 开发环境可以用 SQLite：
 
@@ -358,6 +391,7 @@ migrations/env.py
 migrations/versions/0001_baseline.py
 migrations/versions/0002_auth_tenancy_idempotency.py
 migrations/versions/0003_security_hardening.py
+migrations/versions/0004_learners_created_at_default.py
 ```
 
 常用命令：
@@ -377,7 +411,13 @@ $env:SQLITE_PATH = "knowledge.db"
 alembic upgrade head
 ```
 
-已有旧库也支持升级：`0001` 使用 `CREATE TABLE IF NOT EXISTS` 兼容存量表，`0002` 用 inspector 判断后再补幂等列，`0003` 新增 `ws_tickets`、`login_throttle`、`audit_logs`。当前 head 是 `0003_security_hardening`。
+已有旧库也支持升级：`0001` 使用 `CREATE TABLE IF NOT EXISTS` 兼容存量表，`0002` 用 inspector 判断后再补幂等列，`0003` 新增 `ws_tickets`、`login_throttle`、`audit_logs`，`0004` 补上 `learners.created_at` 的默认值。当前 head 是 `0004_learners_created_at_default`。
+
+> `0004` 修的是一个只在生产口径下才会暴露的缺陷：运行时建表（`AUTO_APPLY_SCHEMA=true`）给
+> `learners.created_at` 带了 `DEFAULT now()`，而 `0001` 基线漏了它；写入语句又依赖这个默认值，
+> 于是「只跑迁移」的库（容器/生产）第一次创建学习者就会违反 `NOT NULL`。修复分两层：写入
+> 显式带上 `created_at`，迁移补默认值——两条路径的 schema 现在逐列一致（可用
+> `information_schema.columns` 对比验证）。
 
 ## 7. 运维与可观测性
 
@@ -413,7 +453,7 @@ alembic upgrade head
 ## 8. 开发与测试
 
 ```powershell
-pip install -r requirements-dev.txt   # ruff / mypy / pytest
+pip install -r requirements-dev.txt -c constraints.txt   # ruff / mypy / pytest
 
 ruff check .                          # 静态检查（配置在 pyproject.toml）
 mypy                                  # 类型检查（范围见 pyproject 的 files）
@@ -424,9 +464,19 @@ $env:TEST_DATABASE_URL = "postgresql://multi_agent:multi_agent_dev@127.0.0.1:543
 pytest tests/test_store_postgres.py -q
 ```
 
-CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑：`ruff check` + `mypy` + 全量 pytest（带 `postgres:16` service，PG 集成测试不会被跳过）。任一步失败即阻塞合并。
+CI（`.github/workflows/ci.yml`）在每次 push / PR / 手动触发上跑三个 job：
+
+| job | 做什么 |
+|---|---|
+| `lint & typecheck` | `ruff check` + `mypy`，依赖走 `constraints.txt` 锁定版本 |
+| `pytest (sqlite + postgres)` | 全量 pytest，带 `postgres:16` service（PG 集成测试不会被跳过）；日志里打印 `pip list` 便于核对版本；JUnit 报告作为 artifact 保留 7 天 |
+| `docker build & smoke` | `docker compose up --wait` 真起一套环境，探 `/health`、`/ready`、`/demo`，并校验 `alembic_version` 到达 head 后销毁 |
+
+任一步失败即阻塞合并。失败时先去 Artifacts 下载 `pytest-report/junit.xml`——它会直接点名是哪个用例、哪一行。
 
 覆盖点：
+
+- Docker：镜像构建、容器内「只跑迁移」建表、`/ready` 通过、迁移到达 head；
 
 - 登录成功/失败、token 撤销、`/auth/me`；
 - 登录失败限流/锁定、成功登录清零、`/auth/audit` 仅管理员可读且不含密码；
@@ -450,7 +500,7 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑：`ruff check` + `m
 - HttpOnly Cookie / OIDC 接入；
 - PII 脱敏、未成年人监护同意、审计日志长期归档；
 - 异步 Outbox Dispatcher / 死信队列（当前事件已随提交事务落库，但没有外部消息投递与重试）；
-- Alembic 纳入 CI/CD，并关闭启动时自动 DDL；
+- 正式 CD 流水线（目前是容器入口执行迁移 + CI 冒烟验证，还没有 staging/prod 发布与回滚演练）；
 - 完整教师/家长报表和内容审核流程。
 
 安全提示：当前 `PLATFORM_ADMIN_TOKEN` 是运维级静态令牌，生产环境应放在 Secrets Manager，并配合 IP 白名单/审计；不要把真实学生密码写进脚本或仓库。

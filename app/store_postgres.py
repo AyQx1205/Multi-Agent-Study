@@ -307,8 +307,8 @@ class PostgresStore:
             async with conn.transaction():
                 await conn.execute(
                     """
-                    INSERT INTO learners(learner_id, metadata)
-                    VALUES($1, $2::jsonb)
+                    INSERT INTO learners(learner_id, created_at, metadata)
+                    VALUES($1, now(), $2::jsonb)
                     ON CONFLICT (learner_id) DO UPDATE
                     SET metadata = excluded.metadata
                     """,
@@ -421,8 +421,8 @@ class PostgresStore:
         ]
         await conn.execute(
             """
-            INSERT INTO learners(learner_id, metadata)
-            VALUES($1, $2::jsonb)
+            INSERT INTO learners(learner_id, created_at, metadata)
+            VALUES($1, now(), $2::jsonb)
             ON CONFLICT (learner_id) DO UPDATE
             SET metadata = excluded.metadata
             """,

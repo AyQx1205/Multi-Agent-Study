@@ -1,0 +1,62 @@
+name: multi-agent-lite
+
+# 一条命令起完整环境：
+#   docker compose up --build
+# 然后打开 http://127.0.0.1:8000/demo
+#
+# 说明：
+# - app 的 DATABASE_URL 在这里显式指向 db 服务，覆盖 .env 里的 127.0.0.1 版本；
+# - AUTO_APPLY_SCHEMA=false + entrypoint 里的 alembic upgrade head：
+#   容器里改表只能走迁移，和生产口径一致；
+# - .env 用 required: false 加载：没有 .env 也能起（默认 MOCK_LLM=true）。
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-multi_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-multi_agent_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-multi_agent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    # 只绑本机，且默认 55432：避免和本机已有的 5432 抢端口
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+
+  app:
+    build:
+      context: .
+    # .env 里的其它调参（限流、阈值、会话时长等）原样带进容器；
+    # 没有 .env 也能起（required: false）。
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 显式覆盖 .env 里的 127.0.0.1 版本：容器里的库是 db 服务
+      DATABASE_URL: postgresql://${POSTGRES_USER:-multi_agent}:${POSTGRES_PASSWORD:-multi_agent_dev}@db:5432/${POSTGRES_DB:-multi_agent}
+      DB_POOL_MIN: ${DB_POOL_MIN:-1}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      # 建表只允许走迁移；迁移在 entrypoint 里跑
+      AUTO_APPLY_SCHEMA: "false"
+      RUN_MIGRATIONS: "1"
+      # LLM：没有 .env 时默认 Mock（不花钱、结果确定），适合评审者直接跑；
+      # 本地 .env 里写 MOCK_LLM=false + LLM_API_KEY=... 就会接真模型。
+      MOCK_LLM: ${MOCK_LLM:-true}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4.1-flash}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -16,6 +16,7 @@
   - `0001_baseline` 兼容存量表；
   - `0002_auth_tenancy_idempotency` 新增认证/租户表和幂等列；
   - `0003_security_hardening` 新增 WS ticket、登录限流、审计日志表；
+  - `0004_learners_created_at_default` 补 `learners.created_at` 默认值，让「只跑迁移」的库与运行时 schema 一致；
 - 提交事务一致性（P0-1）：
   - `attempts + knowledge_states + review_items + events` 同一事务提交，Agent/DB 失败整笔回滚；
   - PostgreSQL `pg_advisory_xact_lock(learner_id)` 串行化同一学生的多实例并发提交；
@@ -29,7 +30,8 @@
   - Alembic `0003_security_hardening`。
 - 单元/集成测试覆盖登录、隔离、幂等、事务回滚、并发提交、迁移、CORS、限流、审计、一次性 ticket、SQLite/PostgreSQL。
 
-仍未完成：OIDC/HttpOnly Cookie、密码强度/重置、PII/未成年人同意、异步 Outbox/外部投递、CI/CD 中自动迁移、关闭启动时自动 DDL、可观测性与多实例 WebSocket 广播。详见 `README.md` 的“还没做的生产项”。
+仍未完成：OIDC/HttpOnly Cookie、密码强度/重置、PII/未成年人同意、异步 Outbox/外部投递、正式 CD（staging/prod 发布与回滚演练）、可观测性与多实例 WebSocket 广播。
+已完成：Docker + docker compose 一键启动、镜像内「先迁移后启动」、CI 三个 job（lint / pytest+PG / 容器冒烟）与依赖版本锁定（`constraints.txt`）。详见 `README.md` 的“还没做的生产项”。
 
 ## 0. 先定边界（W1）
 

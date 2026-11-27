@@ -1,3 +1,5 @@
+# 运行时依赖（镜像里只装这些）。
+# 精确版本由 constraints.txt 钉住；这里保留范围，方便单独升级某一个包。
 pydantic>=2.9
 fastapi>=0.115
 uvicorn[standard]>=0.32
@@ -5,5 +7,3 @@ httpx>=0.28
 asyncpg>=0.30
 alembic>=1.13
 python-dotenv>=1.0
-pytest>=8.3
-pytest-asyncio>=0.24

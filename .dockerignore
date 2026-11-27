@@ -1,0 +1,21 @@
+# 本地开发/CI 产物，不进镜像
+.venv/
+.git/
+.github/
+.tmp/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+*.db
+*.db-wal
+*.db-shm
+.env
+knowledge.db
+
+# 只跑服务时用不到的东西
+tests/
+report/
+deck/
+*.md

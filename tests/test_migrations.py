@@ -28,6 +28,11 @@ def _run_alembic(db_path: Path) -> None:
         env=env,
         capture_output=True,
         text=True,
+        # 不指定编码时，Windows 会按本地代码页（GBK）解码 alembic 的 UTF-8 输出，
+        # 中文日志会导致读取线程抛 UnicodeDecodeError，stderr 变成空串——
+        # 断言失败时就看不到真正的原因了。
+        encoding="utf-8",
+        errors="replace",
     )
     assert result.returncode == 0, result.stderr
 
@@ -62,7 +67,7 @@ def test_upgrade_fresh_database() -> None:
             "audit_logs",
         } <= tables
         assert {"idempotency_key", "request_fingerprint"} <= columns
-        assert version == ("0003_security_hardening",)
+        assert version == ("0004_learners_created_at_default",)
     finally:
         db.unlink(missing_ok=True)
 
